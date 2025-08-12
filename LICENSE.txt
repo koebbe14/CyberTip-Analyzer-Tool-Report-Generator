@@ -1,0 +1,38 @@
+Patrick Koebbe Freeware License (PKFL) v1.0
+Copyright (c) 2025 Patrick Koebbe. All rights reserved.
+
+1. Grant of Rights
+   Subject to the terms below, you may, free of charge:
+   - Use the Software for any purpose (including commercial use).
+   - Copy and redistribute the Software in unmodified form.
+
+2. Restrictions
+   - No Modifications: You may not modify, reverse engineer, decompile, or create derivative works of the Software without prior written permission from the copyright holder.
+   - No Paid Distribution of the Software: You may not sell, rent, lease, or charge for the Software itself. 
+     (Reasonable fees for distribution media, hosting, or installation services are allowed, provided the Software remains free.)
+   - No Misrepresentation: You must not misrepresent the origin of the Software. All redistributions must retain this license and the copyright notice.
+   - No Use of Trademarks: This license does not grant rights to use any names, logos, or trademarks of the copyright holder.
+
+3. Ownership
+   The Software is licensed, not sold. All rights not expressly granted are reserved by Patrick Koebbe.
+
+4. Warranty Disclaimer
+   THE SOFTWARE IS PROVIDED “AS IS” AND “AS AVAILABLE,” WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, 
+   INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, 
+   AND NON-INFRINGEMENT. YOUR USE OF THE SOFTWARE IS AT YOUR SOLE RISK.
+
+5. Limitation of Liability
+   TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, IN NO EVENT SHALL THE COPYRIGHT HOLDER BE LIABLE FOR 
+   ANY DAMAGES OR LOSSES OF ANY KIND (INCLUDING, WITHOUT LIMITATION, LOSS OF PROFITS, BUSINESS INTERRUPTION, 
+   LOSS OF DATA, OR OTHER COMMERCIAL DAMAGES OR LOSSES), EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGES.
+
+6. Termination
+   This license terminates automatically if you fail to comply with any term. Upon termination, you must cease use 
+   and distribution of the Software. Provisions intended to survive (including Ownership, Warranty Disclaimer, and 
+   Limitation of Liability) shall survive termination.
+
+7. Updates to License
+   The copyright holder may release updated license terms for future versions of the Software. This version applies 
+   to the copy of the Software with which it is distributed unless explicitly superseded.
+
+“Software” means the program and any accompanying files distributed with this license.
