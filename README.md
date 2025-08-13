@@ -1,9 +1,9 @@
 <a href="https://www.buymeacoffee.com/koebbe14" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/default-orange.png" alt="Buy Me A Coffee" height="41" width="174"></a>
 Broke ass geek cop tryna do nerd stuff...If you find my programs helpful or enjoy using them, feel free to buy me a coffee to keep the coding vibes going! 😊
 
-CAT-RG: CyberTip Analysis Tool & Report Generator
+# CAT-RG: CyberTip Analysis Tool & Report Generator
 
-Introduction:
+## Introduction:
 
 CAT-RG (CyberTip Analysis Tool & Report Generator) is a standalone Windows application designed to analyze CyberTipline JSON reports from the National Center for Missing and Exploited Children (NCMEC). It extracts key information such as suspect details, incident summaries, evidence (e.g., uploaded files), and IP addresses, then generates formatted reports in DOCX format. The tool also supports optional exports to text and Excel files for IP data and evidence summaries.
 
@@ -13,7 +13,7 @@ Version: 1.9
 Release Date: August 04, 2025
 Platform: Windows 
 
-Features:
+## Features:
 
 •	JSON Report Analysis: Parses CyberTipline JSON files to extract incident summaries, suspect information, evidence details (e.g., files, URLs, chats), and IP addresses.
 
@@ -49,7 +49,7 @@ Features:
   o	Threaded analysis for responsiveness during long queries.
   o	Error handling for invalid JSON, missing credentials, or query failures.
   
-Installation and Setup
+## Installation and Setup
 
 Since CAT-RG is packaged as a standalone .exe using PyInstaller, no Python or additional libraries are needed on the end-user's machine. All dependencies (e.g., tkinter, openpyxl, python-docx, requests, Pillow) are bundled.
 
@@ -74,7 +74,7 @@ Since CAT-RG is packaged as a standalone .exe using PyInstaller, no Python or ad
   o	Tested on Windows 10/11. Ensure antivirus doesn't block the .exe (add exception if needed).
   o	The app requires write access to its directory for saving config files and reports.
 
-How to Use
+# How to Use
 
 Starting the Application
 •	Launch CAT-RG.exe.
@@ -87,7 +87,7 @@ Starting the Application
   o	Status label (starts as "Ready").
   o	Output text area for report previews.
 
-Analyzing a CyberTip Report
+## Analyzing a CyberTip Report
 
 1.	Select a JSON File: 
   o	Click "Browse to .json" or use File > Open File (Ctrl+O).
@@ -121,14 +121,14 @@ Analyzing a CyberTip Report
   o	Help > Update Investigator Info: Re-prompt for name/title.
   o	Help > Update ARIN API Key: Re-prompt for ARIN key.
 
-Report Structure
+## Report Structure
 
 •	Incident Summary: Type, date/time, reported by ESP, description.
 •	Suspect Information: Name, DOB, email, phone, address, screen name, etc. (ESP-specific details like MeetMe profile).
 •	Evidence Summary: File details (name, hash, upload time, tags, IP), viewed by ESP, investigator description. Includes webpage/URL info for X/Twitter or Reddit.
 •	IP Address Analysis: Unique IPs with occurrences (date/time, port, event), MaxMind geolocation, ARIN ownership.
 
-Creating API Keys
+## Creating API Keys
 
 MaxMind Credentials (Required)
 MaxMind provides geolocation data. Credentials are free for basic use.
@@ -201,7 +201,7 @@ Troubleshooting
 •	Large Reports Slow: Cap IPs at 50 or use ARIN key.
 •	Errors on Launch: Check for missing config files or antivirus blocking. Run as admin if needed.
 
-Support and Contact
+## Support and Contact
 
 For issues, feature requests, or support:
 
