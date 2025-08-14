@@ -205,6 +205,6 @@ Troubleshooting
 
 For issues, feature requests, or support:
 
-•	Contact: Patrick Koebbe - Patrick.Koebbe@ilag.gov
+•	Contact: Patrick Koebbe - Patrick.Koebbe@gmail.com
 •	Include error messages, JSON sample, and steps to reproduce.
 
