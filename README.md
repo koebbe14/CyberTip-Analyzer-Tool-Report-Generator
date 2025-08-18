@@ -18,7 +18,10 @@ Platform: Windows
 •	JSON Report Analysis: Parses CyberTipline JSON files to extract incident summaries, suspect information, evidence details (e.g., files, URLs, chats), and IP addresses.
 
 •	Report Generation: Automatically creates a detailed DOCX report with sections for Incident Summary, Suspect Information, Evidence Summary, and IP Address Analysis. 
-
+    - "Customize Report Statements" feature provides the ability to add/modify/or delete statements that are exported in the "report"
+    - allows user to edit the pre-formatted report statements or create "new" statements to be including in the report
+    - allows for "conditional" formatting of customized report statements (for example: if ESP is facebook, add [your own custom statement] to a specific section of the report)
+    
 •	IP Address Analysis: Extracts unique IPs, queries MaxMind for geolocation (city/country) and ARIN for ownership (organization). Handles IPv4/IPv6, with optional query capping for large reports (>50 IPs).
 
 •	Exports: 
@@ -47,7 +50,8 @@ Platform: Windows
 •	Additional Notes: 
   o	Automatic saving of credentials and investigator info to JSON files for future runs.
   o	Threaded analysis for responsiveness during long queries.
-  o	Error handling for invalid JSON, missing credentials, or query failures.
+  o	Error handling for invalid JSON, missing credentials, or query failures
+  o	"Check for Updates" feature checks version against latest release in Github Repo
   
 ## Installation and Setup
 
