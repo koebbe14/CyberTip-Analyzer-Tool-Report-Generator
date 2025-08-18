@@ -18,7 +18,6 @@ Platform: Windows
 •	JSON Report Analysis: Parses CyberTipline JSON files to extract incident summaries, suspect information, evidence details (e.g., files, URLs, chats), and IP addresses.
 
 •	Report Generation: Automatically creates a detailed DOCX report with sections for Incident Summary, Suspect Information, Evidence Summary, and IP Address Analysis. 
-
     - "Customize Report Statements" feature provides the ability to add/modify/or delete statements that are exported in the "report"
     - allows user to edit the pre-formatted report statements or create "new" statements to be including in the report
     - allows for "conditional" formatting of customized report statements (for example: if ESP is facebook, add [your own custom statement] to a specific section of the report)
