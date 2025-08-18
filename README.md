@@ -9,7 +9,7 @@ CAT-RG (CyberTip Analysis Tool & Report Generator) is a standalone Windows appli
 
 This tool supports various Electronic Service Providers (ESPs) and uses external services like MaxMind for geolocation and ARIN for WHOIS data on IP addresses.
 
-Version: 1.9
+Version: 2.0
 Release Date: August 04, 2025
 Platform: Windows 
 
