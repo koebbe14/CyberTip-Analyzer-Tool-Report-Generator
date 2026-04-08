@@ -1,6 +1,6 @@
 
 # CAT-RG: CyberTip Analysis Tool & Report Generator
-
+CAT-RG-Ver2.0.py
 ###  Click on "Releases" (to the right) and download the .exe file
 
 ## Introduction:
@@ -235,4 +235,293 @@ For unlisted ESPs, basic parsing works, but ESP-specific notes (e.g., statements
 For issues, feature requests, or support:
 
 - Contact: Patrick Koebbe - Patrick.Koebbe@gmail.com
-- Include error messages, JSON sample, and steps to reproduce.
+- Include error messages, JSON sample, and steps to reproduce.<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pong Game</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background: linear-gradient(135deg, #0a0a0a 0%, #1a1a2e 100%);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            font-family: 'Arial', sans-serif;
+            color: #00ff00;
+        }
+
+        h1 {
+            margin-bottom: 20px;
+            text-shadow: 0 0 10px #00ff00;
+        }
+
+        .game-container {
+            position: relative;
+            border: 3px solid #00ff00;
+            box-shadow: 0 0 20px rgba(0, 255, 0, 0.5);
+        }
+
+        canvas {
+            display: block;
+            background-color: #000;
+        }
+
+        .scoreboard {
+            text-align: center;
+            margin-top: 20px;
+            font-size: 24px;
+            text-shadow: 0 0 10px #00ff00;
+        }
+
+        .instructions {
+            margin-top: 20px;
+            text-align: center;
+            font-size: 14px;
+            color: #00aa00;
+        }
+
+        .instructions p {
+            margin: 5px 0;
+        }
+    </style>
+</head>
+<body>
+    <h1>🎮 PONG GAME 🎮</h1>
+    <div class="game-container">
+        <canvas id="pongCanvas" width="800" height="400"></canvas>
+    </div>
+    <div class="scoreboard">
+        <p>Player: <span id="playerScore">0</span> | Computer: <span id="computerScore">0</span></p>
+    </div>
+    <div class="instructions">
+        <p>🎯 Use <strong>Arrow Up/Down</strong> to move your paddle (Left side)</p>
+        <p>🖱️ Or move your <strong>Mouse</strong> vertically to control your paddle</p>
+        <p>🤖 Computer AI controls the right paddle</p>
+        <p>Press <strong>R</strong> to reset the game</p>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('pongCanvas');
+        const ctx = canvas.getContext('2d');
+
+        // Game Objects
+        const ball = {
+            x: canvas.width / 2,
+            y: canvas.height / 2,
+            radius: 8,
+            dx: 4,
+            dy: -4,
+            speed: 4
+        };
+
+        const paddleWidth = 12;
+        const paddleHeight = 80;
+
+        const playerPaddle = {
+            x: 10,
+            y: canvas.height / 2 - paddleHeight / 2,
+            width: paddleWidth,
+            height: paddleHeight,
+            dy: 0,
+            speed: 6
+        };
+
+        const computerPaddle = {
+            x: canvas.width - paddleWidth - 10,
+            y: canvas.height / 2 - paddleHeight / 2,
+            width: paddleWidth,
+            height: paddleHeight,
+            speed: 4.5
+        };
+
+        // Game State
+        let score = {
+            player: 0,
+            computer: 0
+        };
+
+        let keys = {
+            ArrowUp: false,
+            ArrowDown: false
+        };
+
+        let mouseY = canvas.height / 2;
+
+        // Event Listeners
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+                keys[e.key] = true;
+            }
+            if (e.key.toLowerCase() === 'r') {
+                resetGame();
+            }
+        });
+
+        document.addEventListener('keyup', (e) => {
+            if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+                keys[e.key] = false;
+            }
+        });
+
+        document.addEventListener('mousemove', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            mouseY = e.clientY - rect.top;
+        });
+
+        // Drawing Functions
+        function drawRect(x, y, width, height, color) {
+            ctx.fillStyle = color;
+            ctx.fillRect(x, y, width, height);
+        }
+
+        function drawCircle(x, y, radius, color) {
+            ctx.fillStyle = color;
+            ctx.beginPath();
+            ctx.arc(x, y, radius, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.closePath();
+        }
+
+        function drawCenter() {
+            ctx.strokeStyle = '#00ff00';
+            ctx.setLineDash([5, 5]);
+            ctx.beginPath();
+            ctx.moveTo(canvas.width / 2, 0);
+            ctx.lineTo(canvas.width / 2, canvas.height);
+            ctx.stroke();
+            ctx.setLineDash([]);
+        }
+
+        function drawGame() {
+            // Clear canvas
+            drawRect(0, 0, canvas.width, canvas.height, '#000');
+
+            // Draw center line
+            drawCenter();
+
+            // Draw paddles
+            drawRect(playerPaddle.x, playerPaddle.y, playerPaddle.width, playerPaddle.height, '#00ff00');
+            drawRect(computerPaddle.x, computerPaddle.y, computerPaddle.width, computerPaddle.height, '#00ff00');
+
+            // Draw ball
+            drawCircle(ball.x, ball.y, ball.radius, '#00ff00');
+        }
+
+        // Update Functions
+        function updatePlayerPaddle() {
+            // Keyboard control
+            if (keys.ArrowUp && playerPaddle.y > 0) {
+                playerPaddle.y -= playerPaddle.speed;
+            }
+            if (keys.ArrowDown && playerPaddle.y < canvas.height - playerPaddle.height) {
+                playerPaddle.y += playerPaddle.speed;
+            }
+
+            // Mouse control - smoothly follow mouse
+            const mouseTarget = mouseY - playerPaddle.height / 2;
+            const distance = mouseTarget - playerPaddle.y;
+            const mouseControl = distance * 0.1; // Smooth following
+
+            playerPaddle.y += mouseControl;
+
+            // Clamp paddle position
+            if (playerPaddle.y < 0) playerPaddle.y = 0;
+            if (playerPaddle.y > canvas.height - playerPaddle.height) {
+                playerPaddle.y = canvas.height - playerPaddle.height;
+            }
+        }
+
+        function updateComputerPaddle() {
+            const computerCenter = computerPaddle.y + computerPaddle.height / 2;
+            
+            // AI follows the ball with some smoothness
+            if (computerCenter < ball.y - 15) {
+                computerPaddle.y += computerPaddle.speed;
+            } else if (computerCenter > ball.y + 15) {
+                computerPaddle.y -= computerPaddle.speed;
+            }
+
+            // Clamp paddle position
+            if (computerPaddle.y < 0) computerPaddle.y = 0;
+            if (computerPaddle.y > canvas.height - computerPaddle.height) {
+                computerPaddle.y = canvas.height - computerPaddle.height;
+            }
+        }
+
+        function updateBall() {
+            ball.x += ball.dx;
+            ball.y += ball.dy;
+
+            // Top and bottom collision
+            if (ball.y - ball.radius < 0 || ball.y + ball.radius > canvas.height) {
+                ball.dy *= -1;
+                // Keep ball in bounds
+                if (ball.y - ball.radius < 0) ball.y = ball.radius;
+                if (ball.y + ball.radius > canvas.height) ball.y = canvas.height - ball.radius;
+            }
+
+            // Player paddle collision
+            if (
+                ball.x - ball.radius < playerPaddle.x + playerPaddle.width &&
+                ball.y > playerPaddle.y &&
+                ball.y < playerPaddle.y + playerPaddle.height
+            ) {
+                ball.dx = Math.abs(ball.dx);
+                const collidePoint = ball.y - (playerPaddle.y + playerPaddle.height / 2);
+                collidePoint / (playerPaddle.height / 2);
+                ball.dy = (collidePoint / (playerPaddle.height / 2)) * ball.speed;
+                ball.x = playerPaddle.x + playerPaddle.width + ball.radius;
+            }
+
+            // Computer paddle collision
+            if (
+                ball.x + ball.radius > computerPaddle.x &&
+                ball.y > computerPaddle.y &&
+                ball.y < computerPaddle.y + computerPaddle.height
+            ) {
+                ball.dx = -Math.abs(ball.dx);
+                const collidePoint = ball.y - (computerPaddle.y + computerPaddle.height / 2);
+                ball.dy = (collidePoint / (computerPaddle.height / 2)) * ball.speed;
+                ball.x = computerPaddle.x - ball.radius;
+            }
+
+            // Score points
+            if (ball.x - ball.radius < 0) {
+                score.computer++;
+                resetBall();
+            }
+            if (ball.x + ball.radius > canvas.width) {
+                score.player++;
+                resetBall();
+            }
+
+            updateScore();
+        }
+
+        function resetBall() {
+            ball.x = canvas.width / 2;
+            ball.y = canvas.height / 2;
+            const angle = (Math.random() - 0.5) * Math.PI / 4;
+            ball.dx = ball.speed * Math.cos(angle) * (Math.random() > 0.5 ? 1 : -1);
+            ball.dy = ball.speed * Math.sin(angle);
+        }
+
+        function resetGame() {
+            score.player = 0;
+            score.computer = 0;
+            resetBall();
+            updateScore();
+        workspacecyclesearchone@gmail.com 
+
+  e'FIRMWARE I will zcfcz have Python z,Packages zvw svzzizv zrf fwvzw think think think z oszr think think think think have have think think think have ezr kzz z kzhttps://radar.cloudflare.com/scanp();
+    *
+git@github.com:koebbe14/CyberTip-Analyzer-Tool-Report-Generator.git{mailto:workspacecyclesearchone@gmail.com}
