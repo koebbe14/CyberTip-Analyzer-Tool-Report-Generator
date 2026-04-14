@@ -13,8 +13,14 @@ def get_base_path() -> Path:
 
     Use this for read-only bundled assets (e.g. logo.jpg).
     For user-writable data, use :func:`get_data_path` instead.
+
+    When frozen with PyInstaller (especially one-file), assets live under
+    ``sys._MEIPASS``, not next to the executable.
     """
     if getattr(sys, "frozen", False):
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            return Path(meipass)
         return Path(sys.executable).parent
     return Path(__file__).resolve().parent.parent.parent
 

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Optional, Set
+import re
+from typing import Dict, Optional, Set
 
 from docx import Document
 from docx.shared import Pt, Inches
@@ -71,9 +72,10 @@ def _build_all_headers(stmts: StatementManager, tmpl: Optional[ReportTemplate] =
 
     for key in stmts.selected:
         if key not in DEFAULT_STATEMENTS:
-            for prefix in ("at_beginning:", "before_incident:", "after_incident:",
+            for prefix in ("at_beginning:", "after_intro:", "before_incident:", "after_incident:",
                            "before_suspect:", "after_suspect:", "before_evidence:",
-                           "after_evidence:", "before_ip:", "after_ip:", ""):
+                           "after_evidence:", "before_ip:", "after_ip:",
+                           "after_all_sections:", ""):
                 if key.startswith(prefix):
                     sub = key[len(prefix):].strip()
                     if sub:
@@ -93,6 +95,36 @@ HIGHLIGHT_MAP = {
 }
 
 
+def _build_stmt_format_map(stmts: StatementManager) -> Dict[str, dict]:
+    """Build a mapping of statement text fragments to their formatting metadata.
+
+    Only includes custom statements that have non-default formatting.
+    """
+    fmt_map: Dict[str, dict] = {}
+    for key, val in stmts.statements.items():
+        if key in DEFAULT_STATEMENTS:
+            continue
+        if not isinstance(val, dict):
+            continue
+        fmt = val.get("formatting")
+        if not fmt:
+            continue
+        is_default = (
+            fmt.get("font_size", 12) == 12
+            and not fmt.get("bold", False)
+            and not fmt.get("italic", False)
+            and fmt.get("indent", 0.0) == 0.0
+            and not fmt.get("highlight", "")
+        )
+        if is_default:
+            continue
+        text = val.get("text", "").strip()
+        if text:
+            first_line = text.split("\n")[0][:80]
+            fmt_map[first_line] = fmt
+    return fmt_map
+
+
 def save_docx(
     full_report: str,
     filename: str,
@@ -104,23 +136,46 @@ def save_docx(
     """Write *full_report* to a styled DOCX file and return the filename."""
     doc = Document()
     all_headers = _build_all_headers(stmts, template)
+    stmt_fmt_map = _build_stmt_format_map(stmts)
 
     sections = full_report.split("\n\n")
     for section in sections:
         if not section.strip():
             continue
 
-        p = doc.add_paragraph()
+        stmt_fmt = _match_stmt_format(section.strip(), stmt_fmt_map)
+
+        if stmt_fmt and stmt_fmt.get("indent", 0.0) > 0:
+            p = doc.add_paragraph()
+            p.paragraph_format.left_indent = Inches(stmt_fmt["indent"])
+        else:
+            p = doc.add_paragraph()
         p.paragraph_format.space_after = 0
         p.paragraph_format.line_spacing = 1.0
         lines = section.split("\n")
+
+        is_cybertip_separator = bool(re.match(r"^={10,}", lines[0].strip())) if lines else False
+        if is_cybertip_separator:
+            doc.add_page_break()
+            p = doc.add_paragraph()
+            p.paragraph_format.space_after = 0
+            p.paragraph_format.line_spacing = 1.0
 
         for i, line in enumerate(lines):
             stripped = line.strip()
             if not stripped:
                 continue
 
-            if stripped in all_headers:
+            is_cybertip_header = bool(re.match(r"^CYBERTIP #\d+", stripped))
+
+            if is_cybertip_header:
+                run = p.add_run(stripped + "\n")
+                run.bold = True
+                run.font.size = Pt(14)
+                run.font.name = "Times New Roman"
+                _apply_shading(run, "B0C4DE")
+
+            elif stripped in all_headers:
                 run = p.add_run(stripped + "\n")
                 run.bold = True
                 run.font.size = Pt(13)
@@ -147,6 +202,18 @@ def save_docx(
             elif _starts_with_label(stripped):
                 _format_label_line(p, line, stripped)
 
+            elif stmt_fmt:
+                run = p.add_run(line)
+                run.font.size = Pt(stmt_fmt.get("font_size", 12))
+                run.font.name = "Times New Roman"
+                if stmt_fmt.get("bold"):
+                    run.bold = True
+                if stmt_fmt.get("italic"):
+                    run.italic = True
+                hl = stmt_fmt.get("highlight", "")
+                if hl and hl in HIGHLIGHT_MAP:
+                    run.font.highlight_color = _docx_highlight(hl)
+
             else:
                 run = p.add_run(line)
                 run.font.size = Pt(12)
@@ -165,6 +232,28 @@ def save_docx(
 
     doc.save(filename)
     return filename
+
+
+def _match_stmt_format(text: str, fmt_map: Dict[str, dict]) -> Optional[dict]:
+    """Check if *text* starts with any known custom statement first-line."""
+    for first_line, fmt in fmt_map.items():
+        if first_line in text:
+            return fmt
+    return None
+
+
+def _docx_highlight(color_name: str):
+    """Map a highlight color name to a python-docx highlight color enum value."""
+    from docx.enum.text import WD_COLOR_INDEX
+    mapping = {
+        "yellow": WD_COLOR_INDEX.YELLOW,
+        "green": WD_COLOR_INDEX.BRIGHT_GREEN,
+        "cyan": WD_COLOR_INDEX.TURQUOISE,
+        "magenta": WD_COLOR_INDEX.PINK,
+        "red": WD_COLOR_INDEX.RED,
+        "blue": WD_COLOR_INDEX.BLUE,
+    }
+    return mapping.get(color_name)
 
 
 def _starts_with_label(text: str) -> bool:

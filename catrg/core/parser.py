@@ -7,6 +7,7 @@ Excel export, and comparison all use the same code paths.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -106,7 +107,7 @@ def load_json(file_path: str) -> Optional[dict]:
 def parse_email_incidents(data: dict) -> Dict[str, dict]:
     """Extract email metadata keyed by message ID."""
     result: Dict[str, dict] = {}
-    for email in data.get("reportedInformation", {}).get("incidentDetails", {}).get("emailIncident", []):
+    for email in ((data.get("reportedInformation") or {}).get("incidentDetails") or {}).get("emailIncident") or []:
         contents = email.get("contents", [{}])[0].get("value", "")
         sent_date = from_email = to_email = msg_id = None
         for line in contents.split("\n"):
@@ -223,7 +224,10 @@ def extract_ip_addresses(data: dict) -> Tuple[Dict[str, List[IpOccurrence]], Dic
             entries.append((ip, occ))
             unique_ips.add(ip)
 
-    for person in data.get("reportedInformation", {}).get("reportedPeople", {}).get("reportedPersons", []):
+    ri = data.get("reportedInformation") or {}
+    persons_list = (ri.get("reportedPeople") or {}).get("reportedPersons") or []
+    recipients_list = (ri.get("intendedRecipients") or {}).get("intendedRecipients") or []
+    for person in [*persons_list, *recipients_list]:
         si = person.get("sourceInformation")
         if si:
             for cap in si.get("sourceCaptures", []):
@@ -235,7 +239,7 @@ def extract_ip_addresses(data: dict) -> Tuple[Dict[str, List[IpOccurrence]], Dic
                         event=cap.get("eventName"),
                     ))
 
-    for f in data.get("reportedInformation", {}).get("uploadedFiles", {}).get("uploadedFiles", []):
+    for f in (ri.get("uploadedFiles") or {}).get("uploadedFiles") or []:
         si = f.get("sourceInformation")
         if si:
             for cap in si.get("sourceCaptures", []):
@@ -301,8 +305,10 @@ def parse_cybertip(data: dict) -> ParsedCyberTip:
 
 def _parse_persons(data: dict, tip: ParsedCyberTip) -> None:
     esp = tip.esp_name
-    persons_raw = data.get("reportedInformation", {}).get("reportedPeople", {}).get("reportedPersons", [])
-    for person in persons_raw:
+    ri = data.get("reportedInformation") or {}
+    persons_raw = (ri.get("reportedPeople") or {}).get("reportedPersons") or []
+    recipients_raw = (ri.get("intendedRecipients") or {}).get("intendedRecipients") or []
+    for person in [*persons_raw, *recipients_raw]:
         pi = PersonInfo()
 
         field_map = {
@@ -389,7 +395,7 @@ def _parse_persons(data: dict, tip: ParsedCyberTip) -> None:
                         })
 
         if "Imgur" in esp:
-            for info in data.get("reportedInformation", {}).get("additionalInformations", []):
+            for info in (data.get("reportedInformation") or {}).get("additionalInformations") or []:
                 val = safe_get(info.get("value"))
                 if val:
                     pi.esp_extra["imgur_additional"] = val
@@ -431,7 +437,7 @@ def _parse_xcorp_person(person: dict, pi: PersonInfo) -> None:
 
 
 def _parse_meetme_person(data: dict, person: dict, pi: PersonInfo) -> None:
-    for info in data.get("reportedInformation", {}).get("additionalInformations", []):
+    for info in (data.get("reportedInformation") or {}).get("additionalInformations") or []:
         val = safe_get(info.get("value"))
         if val and "Registration details from Suspect's MeetMe profile" in val:
             profile: Dict[str, str] = {}
@@ -468,7 +474,7 @@ def _parse_meetme_person(data: dict, person: dict, pi: PersonInfo) -> None:
 
 
 def _parse_evidence(data: dict, tip: ParsedCyberTip) -> None:
-    files_raw = data.get("reportedInformation", {}).get("uploadedFiles", {}).get("uploadedFiles", [])
+    files_raw = ((data.get("reportedInformation") or {}).get("uploadedFiles") or {}).get("uploadedFiles") or []
     for i, f in enumerate(files_raw, 1):
         ef = EvidenceFile(file_number=i)
         ef.filename = safe_get(f.get("filename"))
@@ -510,7 +516,7 @@ def _parse_evidence(data: dict, tip: ParsedCyberTip) -> None:
 
 
 def _parse_webpages(data: dict, tip: ParsedCyberTip) -> None:
-    webpages = data.get("reportedInformation", {}).get("incidentDetails", {}).get("webpageIncident", [])
+    webpages = ((data.get("reportedInformation") or {}).get("incidentDetails") or {}).get("webpageIncident") or []
     for i, wp in enumerate(webpages, 1):
         wi = WebpageInfo(number=i)
 
@@ -539,7 +545,7 @@ def _parse_meetme_extras(data: dict, tip: ParsedCyberTip) -> None:
     if "MeetMe" not in tip.esp_name:
         return
 
-    for info in data.get("reportedInformation", {}).get("additionalInformations", []):
+    for info in (data.get("reportedInformation") or {}).get("additionalInformations") or []:
         val = safe_get(info.get("value"))
         if not val:
             continue
@@ -587,8 +593,59 @@ def _parse_meetme_extras(data: dict, tip: ParsedCyberTip) -> None:
         tip.meetme_messages.extend(messages)
 
 
+# Patterns used to mine identifiers from free-text fields.
+_RE_EMAIL = re.compile(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z]{2,}")
+_RE_PHONE = re.compile(r"\+?\d[\d\s\-().]{7,}\d")
+_RE_IPV4 = re.compile(
+    r"\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}"
+    r"(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b"
+)
+_RE_IPV6 = re.compile(r"\b(?:[0-9a-fA-F]{1,4}:){2,7}[0-9a-fA-F]{1,4}\b")
+_RE_URL = re.compile(r"https?://[^\s\"'<>]+", re.IGNORECASE)
+_RE_CASHTAG = re.compile(r"\$([A-Za-z][A-Za-z0-9_]{1,19})\b")
+_RE_USERNAME_LINE = re.compile(
+    r"(?:user\s*(?:name|id)|screen\s*name|display\s*name|"
+    r"cashtag|handle|account\s*(?:name|id))\s*[:\-]\s*(.+)",
+    re.IGNORECASE,
+)
+
+
+def _mine_text_for_identifiers(text: str, result: Dict[str, set]) -> None:
+    """Extract identifiers from unstructured text into *result* sets."""
+    for m in _RE_EMAIL.finditer(text):
+        result["emails"].add(m.group().lower())
+
+    for m in _RE_PHONE.finditer(text):
+        digits = re.sub(r"[^\d+]", "", m.group())
+        if len(digits.lstrip("+")) >= 7:
+            result["phones"].add(digits)
+
+    for m in _RE_IPV4.finditer(text):
+        if is_valid_ip(m.group()):
+            result["ips"].add(m.group())
+    for m in _RE_IPV6.finditer(text):
+        if is_valid_ip(m.group()):
+            result["ips"].add(m.group())
+
+    for m in _RE_URL.finditer(text):
+        result["urls"].add(m.group().lower().rstrip(".,;)"))
+
+    for m in _RE_CASHTAG.finditer(text):
+        result["screen_names"].add("$" + m.group(1).lower())
+
+    for m in _RE_USERNAME_LINE.finditer(text):
+        val = m.group(1).strip().strip("\"'")
+        if val and val.lower() not in ("n/a", "none", "unknown", ""):
+            result["screen_names"].add(val.lower())
+
+
 def extract_comparison_data(data: dict) -> dict:
-    """Extract identifiers for cross-tip comparison."""
+    """Extract identifiers for cross-tip comparison.
+
+    Pulls data from structured person/evidence/webpage fields AND
+    mines free-text additionalInformations so ESPs that store suspect
+    info as unstructured text (e.g. Block/Cash App) are captured.
+    """
     tip = parse_cybertip(data)
     result: Dict[str, set] = {
         "ips": set(),
@@ -596,9 +653,11 @@ def extract_comparison_data(data: dict) -> dict:
         "phones": set(),
         "screen_names": set(),
         "user_ids": set(),
+        "urls": set(),
         "hashes": set(),
     }
 
+    # --- structured fields ---
     for ip in tip.all_ip_data:
         result["ips"].add(ip)
 
@@ -612,11 +671,26 @@ def extract_comparison_data(data: dict) -> dict:
         uid = person.fields.get("ESP User ID")
         if uid:
             result["user_ids"].add(uid)
+        if person.additional_contact:
+            _mine_text_for_identifiers(person.additional_contact, result)
+
+    for wp in tip.webpages:
+        if wp.url:
+            result["urls"].add(wp.url.lower())
 
     for ef in tip.evidence_files:
         if ef.verification_hash:
             result["hashes"].add(ef.verification_hash)
         for ip in ef.ip_addresses:
             result["ips"].add(ip)
+        if ef.from_email:
+            result["emails"].add(ef.from_email.lower())
+        if ef.to_email:
+            result["emails"].add(ef.to_email.lower())
+
+    # --- free-text mining (catches ESPs like Block/Cash App that embed
+    #     recipient/suspect info in additionalInformations) ---
+    for text in tip.additional_informations:
+        _mine_text_for_identifiers(text, result)
 
     return {k: v for k, v in result.items() if v}

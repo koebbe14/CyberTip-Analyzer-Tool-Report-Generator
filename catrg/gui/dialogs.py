@@ -9,9 +9,11 @@ from __future__ import annotations
 import os
 import re
 import webbrowser
+from collections import defaultdict
+from pathlib import Path
 import tkinter as tk
-from tkinter import filedialog, messagebox, scrolledtext, ttk
-from typing import TYPE_CHECKING, Dict, List, Optional, Set
+from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
+from typing import TYPE_CHECKING, Callable, Dict, FrozenSet, List, Optional, Set, Tuple
 
 from catrg.models.config import ConfigManager
 from catrg.models.statements import (
@@ -20,6 +22,7 @@ from catrg.models.statements import (
     DEFAULT_FORMATTING,
     PLACEMENT_PREFIXES,
     PREFIX_TO_PLACEMENT,
+    get_all_placement_prefixes,
 )
 from catrg.core.parser import load_json, extract_comparison_data
 from catrg.core.report_generator import (
@@ -165,7 +168,18 @@ def show_arin_dialog(root: tk.Tk, config: ConfigManager) -> Optional[tk.Toplevel
 
 # ── Customise Statements ─────────────────────────────────────────
 
-def show_customize_statements_dialog(root: tk.Tk, stmts: StatementManager) -> None:
+# Display names for built-in statement keys (inner tabs under "Standard report statements").
+_STANDARD_STATEMENT_TAB_LABELS: Dict[str, str] = {
+    "intro": "Introduction",
+    "meta": "Meta disclaimer",
+    "ip_intro": "IP analysis intro",
+    "bingimage": "Bing Image",
+    "xcorp": "X (Twitter)",
+}
+
+
+def show_customize_statements_dialog(root: tk.Tk, stmts: StatementManager,
+                                      template=None) -> None:
     dialog = tk.Toplevel(root)
     dialog.title("Customize Report Statements")
     dialog.geometry("1000x800")
@@ -175,10 +189,32 @@ def show_customize_statements_dialog(root: tk.Tk, stmts: StatementManager) -> No
     notebook = ttk.Notebook(dialog)
     notebook.pack(fill="both", expand=True, padx=10, pady=10)
 
+    # ── Outer tab 1: all built-in statements in a nested notebook ──
+    standard_outer = ttk.Frame(notebook)
+    notebook.add(standard_outer, text="Standard report statements")
+
+    intro = ttk.Frame(standard_outer)
+    intro.pack(fill="x", padx=12, pady=(10, 4))
+    tk.Label(
+        intro,
+        text="These are the default report paragraphs (introduction, provider notes, IP intro, etc.). "
+             "They are separate from custom statements you add elsewhere.",
+        font=("Arial", 9),
+        fg="#444",
+        wraplength=900,
+        justify=tk.LEFT,
+    ).pack(anchor="w")
+
+    inner_nb = ttk.Notebook(standard_outer)
+    inner_nb.pack(fill="both", expand=True, padx=8, pady=(4, 10))
+
     for key, default_text in DEFAULT_STATEMENTS.items():
-        frame = ttk.Frame(notebook)
-        notebook.add(frame, text=key.capitalize())
-        tk.Label(frame, text=f"Edit {key} statement:").pack(pady=5)
+        frame = ttk.Frame(inner_nb)
+        tab_lbl = _STANDARD_STATEMENT_TAB_LABELS.get(
+            key, key.replace("_", " ").strip().title()
+        )
+        inner_nb.add(frame, text=tab_lbl)
+        tk.Label(frame, text=f"Edit {tab_lbl} text:").pack(pady=5)
         if key == "intro":
             tk.Label(frame, text="Tip: Use [CURRENT_DATE], [INVESTIGATOR_NAME], [INVESTIGATOR_TITLE], "
                      "[CYBERTIP_NUMBER], [REPORT_DATE_RECEIVED] placeholders.",
@@ -201,8 +237,21 @@ def show_customize_statements_dialog(root: tk.Tk, stmts: StatementManager) -> No
         tk.Button(btn_row, text="Save This Statement", command=save_tab).pack(side=tk.LEFT, padx=5)
         tk.Button(btn_row, text="Reset to Default", command=reset_tab).pack(side=tk.LEFT, padx=5)
 
-    _build_add_new_tab(notebook, stmts)
-    _build_manage_tab(notebook, stmts)
+    _manage_statement_refresh_hooks: List[Callable[[], None]] = []
+    _build_add_new_tab(
+        notebook,
+        stmts,
+        template=template,
+        manage_refresh_hooks=_manage_statement_refresh_hooks,
+        tab_title="Add custom statement",
+    )
+    _build_manage_tab(
+        notebook,
+        stmts,
+        template=template,
+        manage_refresh_hooks=_manage_statement_refresh_hooks,
+        tab_title="Manage custom statements",
+    )
 
     bottom = ttk.Frame(dialog)
     bottom.pack(fill="x", padx=10, pady=5)
@@ -211,6 +260,34 @@ def show_customize_statements_dialog(root: tk.Tk, stmts: StatementManager) -> No
         stmts.save()
         dialog.destroy()
 
+    def _export_stmts():
+        path = filedialog.asksaveasfilename(
+            title="Export Custom Statements", defaultextension=".json",
+            filetypes=[("JSON files", "*.json")],
+        )
+        if path:
+            try:
+                stmts.export_to_file(path)
+                messagebox.showinfo("Exported", f"Statements exported to:\n{path}")
+            except Exception as e:
+                messagebox.showerror("Error", f"Export failed: {e}")
+
+    def _import_stmts():
+        path = filedialog.askopenfilename(
+            title="Import Statements", filetypes=[("JSON files", "*.json")],
+        )
+        if not path:
+            return
+        try:
+            count = stmts.import_from_file(path, mode="merge")
+            for hook in _manage_statement_refresh_hooks:
+                hook()
+            messagebox.showinfo("Imported", f"{count} statement(s) imported.")
+        except Exception as e:
+            messagebox.showerror("Error", f"Import failed: {e}")
+
+    ttk.Button(bottom, text="Export Statements", command=_export_stmts).pack(side=tk.LEFT, padx=5)
+    ttk.Button(bottom, text="Import Statements", command=_import_stmts).pack(side=tk.LEFT, padx=5)
     ttk.Button(bottom, text="Save All & Close", command=close_and_save).pack(side=tk.RIGHT, padx=5)
     ttk.Button(bottom, text="Cancel", command=dialog.destroy).pack(side=tk.RIGHT, padx=5)
 
@@ -281,26 +358,49 @@ STATEMENT_TEMPLATES: Dict[str, Dict[str, str]] = {
 }
 
 PLACEMENT_DESCRIPTIONS: Dict[str, str] = {
-    "At Beginning of Report": "Appears before the introduction paragraph at the very top of the report.",
-    "Before Incident Summary": "Appears just above the INCIDENT SUMMARY section header.",
-    "After Incident Summary": "Appears directly below the incident details (type, date, ESP).",
-    "Before Suspect Information": "Appears just above the SUSPECT INFORMATION section header.",
-    "After Suspect Information": "Appears after all suspect/person details.",
-    "Before Evidence Summary": "Appears just above the EVIDENCE SUMMARY section header.",
-    "After Evidence Summary": "Appears after all evidence file details.",
-    "Before IP Address Analysis": "Appears just above the IP ADDRESS ANALYSIS section header.",
-    "After IP Address Analysis": "Appears after all IP lookup results.",
-    "At End of Report": "Appears in a CUSTOM STATEMENTS block at the very end of the report.",
+    "At Beginning of Report": "Before the investigator introduction paragraph (absolute top of the narrative).",
+    "After introduction paragraph": "Right after the opening paragraph, before Incident Summary and other main sections.",
+    "Before Incident Summary": "Immediately above the INCIDENT SUMMARY section.",
+    "After Incident Summary": "Immediately after incident details (type, date, ESP, etc.).",
+    "Before Suspect Information": "Immediately above the SUSPECT INFORMATION section.",
+    "After Suspect Information": "Immediately after all suspect / person details.",
+    "Before Evidence Summary": "Immediately above the EVIDENCE SUMMARY section.",
+    "After Evidence Summary": "Immediately after all evidence file listings.",
+    "Before IP Address Analysis": "Immediately above the IP ADDRESS ANALYSIS section.",
+    "After IP Address Analysis": "Immediately after all IP lookup results.",
+    "After main sections (before final custom block)": "After Incident, Suspect, Evidence, IP, and custom template sections—before the closing CUSTOM STATEMENTS area.",
+    "At End of Report": "Inside the final CUSTOM STATEMENTS block at the very end of the report.",
 }
+
+
+def _placement_description(label: str) -> str:
+    """Help text for a placement combobox label (built-in or custom template section)."""
+    if label in PLACEMENT_DESCRIPTIONS:
+        return PLACEMENT_DESCRIPTIONS[label]
+    if label.startswith("Before "):
+        return (
+            f'Immediately before the "{label[7:]}" section in the report (from your report template).'
+        )
+    if label.startswith("After "):
+        return (
+            f'Immediately after the "{label[6:]}" section in the report (from your report template).'
+        )
+    return ""
 
 HIGHLIGHT_OPTIONS = ["(none)", "yellow", "green", "cyan", "magenta", "red", "blue"]
 
 
 # ── Add New Tab ───────────────────────────────────────────────────
 
-def _build_add_new_tab(notebook: ttk.Notebook, stmts: StatementManager) -> None:
+def _build_add_new_tab(
+    notebook: ttk.Notebook,
+    stmts: StatementManager,
+    template=None,
+    manage_refresh_hooks: Optional[List[Callable[[], None]]] = None,
+    tab_title: str = "Add custom statement",
+) -> None:
     outer = ttk.Frame(notebook)
-    notebook.add(outer, text="Add New")
+    notebook.add(outer, text=tab_title)
     canvas = tk.Canvas(outer, highlightthickness=0)
     vsb = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
     add_frame = ttk.Frame(canvas)
@@ -348,28 +448,28 @@ def _build_add_new_tab(notebook: ttk.Notebook, stmts: StatementManager) -> None:
     place_row = ttk.Frame(step2)
     place_row.pack(fill="x", pady=3)
     tk.Label(place_row, text="Insert Location:").pack(side=tk.LEFT, padx=(0, 5))
-    placement_opts = list(PLACEMENT_PREFIXES.keys())
+    _add_all_prefixes = get_all_placement_prefixes(template)
+    placement_opts = list(_add_all_prefixes.keys())
     placement_var = tk.StringVar(value="At End of Report")
     place_cb = ttk.Combobox(place_row, textvariable=placement_var, values=placement_opts,
                             state="readonly", width=35)
     place_cb.pack(side=tk.LEFT)
 
-    place_desc_var = tk.StringVar(value=PLACEMENT_DESCRIPTIONS.get("At End of Report", ""))
+    place_desc_var = tk.StringVar(value=_placement_description("At End of Report"))
     place_desc_label = tk.Label(step2, textvariable=place_desc_var, fg="gray",
                                 wraplength=700, justify=tk.LEFT)
     place_desc_label.pack(anchor="w", pady=(2, 0))
-
-    # Sort order
-    order_row = ttk.Frame(step2)
-    order_row.pack(fill="x", pady=3)
-    tk.Label(order_row, text="Display Order:").pack(side=tk.LEFT, padx=(0, 5))
-    order_var = tk.IntVar(value=10)
-    order_spin = tk.Spinbox(order_row, from_=1, to=999, textvariable=order_var, width=5)
-    order_spin.pack(side=tk.LEFT)
-    tk.Label(order_row, text="(lower = appears first when multiple statements share the same placement)", fg="gray").pack(side=tk.LEFT, padx=5)
+    tk.Label(
+        step2,
+        text="If you use the same placement for more than one statement, they are ordered alphabetically by statement name.",
+        fg="gray",
+        font=("Arial", 8),
+        wraplength=700,
+        justify=tk.LEFT,
+    ).pack(anchor="w", pady=(4, 0))
 
     def _on_placement_change(*_args):
-        place_desc_var.set(PLACEMENT_DESCRIPTIONS.get(placement_var.get(), ""))
+        place_desc_var.set(_placement_description(placement_var.get()))
     placement_var.trace_add("write", _on_placement_change)
 
     # ── Step 3: Conditional Display ───────────────────────────────
@@ -400,20 +500,42 @@ def _build_add_new_tab(notebook: ttk.Notebook, stmts: StatementManager) -> None:
     custom_esp_entry = tk.Entry(custom_esp_row, width=25)
     custom_esp_entry.pack(side=tk.LEFT)
 
+    tk.Radiobutton(step3, text="Only include when data condition(s) are met (all selected must match):",
+                   variable=cond_mode, value="data").pack(anchor="w", pady=(10, 0))
+
+    _data_conditions = [
+        ("has_evidence", "Report has evidence files"),
+        ("has_ips", "Report has IP addresses"),
+        ("is_multi_tip", "Analyzing multiple CyberTips"),
+        ("suspect_count > 1", "More than one suspect"),
+    ]
+    data_cond_frame = ttk.Frame(step3)
+    data_cond_frame.pack(fill="x", padx=25, pady=5)
+    data_cond_vars: Dict[str, tk.BooleanVar] = {}
+    for _dc_val, _dc_label in _data_conditions:
+        _dv = tk.BooleanVar(value=False)
+        data_cond_vars[_dc_val] = _dv
+        ttk.Checkbutton(data_cond_frame, text=_dc_label, variable=_dv).pack(anchor="w")
+
     cond_summary_var = tk.StringVar(value="Condition: None (appears in all reports)")
     cond_summary = tk.Label(step3, textvariable=cond_summary_var, font=("Arial", 9, "italic"), fg="blue")
     cond_summary.pack(anchor="w", pady=(5, 0))
 
     def _update_cond_summary(*_args):
-        if cond_mode.get() == "always":
+        mode = cond_mode.get()
+        if mode == "always":
             cond_summary_var.set("Condition: None (appears in all reports)")
             for w in esp_check_frame.winfo_children():
                 w.configure(state="disabled")
             custom_esp_entry.configure(state="disabled")
-        else:
+            for w in data_cond_frame.winfo_children():
+                w.configure(state="disabled")
+        elif mode == "specific":
             for w in esp_check_frame.winfo_children():
                 w.configure(state="normal")
             custom_esp_entry.configure(state="normal")
+            for w in data_cond_frame.winfo_children():
+                w.configure(state="disabled")
             selected = [name for name, var in esp_vars.items() if var.get()]
             custom = custom_esp_entry.get().strip()
             if custom:
@@ -424,16 +546,37 @@ def _build_add_new_tab(notebook: ttk.Notebook, stmts: StatementManager) -> None:
                 cond_summary_var.set(f'Condition: Only when ESP is "{selected[0]}"')
             else:
                 cond_summary_var.set(f"Condition: Only when ESP is one of: {', '.join(selected)}")
+        elif mode == "data":
+            for w in esp_check_frame.winfo_children():
+                w.configure(state="disabled")
+            custom_esp_entry.configure(state="disabled")
+            for w in data_cond_frame.winfo_children():
+                w.configure(state="normal")
+            picked = [lab for val, lab in _data_conditions if data_cond_vars[val].get()]
+            if not picked:
+                cond_summary_var.set("Condition: (select at least one data condition above)")
+            elif len(picked) == 1:
+                cond_summary_var.set(f"Condition: {picked[0]}")
+            else:
+                cond_summary_var.set("Condition: All of — " + "; ".join(picked))
 
     cond_mode.trace_add("write", _update_cond_summary)
     for var in esp_vars.values():
         var.trace_add("write", _update_cond_summary)
     custom_esp_entry.bind("<KeyRelease>", lambda e: _update_cond_summary())
+    for _dv in data_cond_vars.values():
+        _dv.trace_add("write", _update_cond_summary)
     _update_cond_summary()
 
     def _get_condition() -> str:
-        if cond_mode.get() == "always":
+        mode = cond_mode.get()
+        if mode == "always":
             return ""
+        if mode == "data":
+            parts = [val for val, _ in _data_conditions if data_cond_vars[val].get()]
+            if not parts:
+                return ""
+            return "&&".join(parts)
         selected = [name for name, var in esp_vars.items() if var.get()]
         custom = custom_esp_entry.get().strip()
         if custom:
@@ -468,6 +611,13 @@ def _build_add_new_tab(notebook: ttk.Notebook, stmts: StatementManager) -> None:
         ("Agency", "[AGENCY_NAME]"),
         ("CyberTip #", "[CYBERTIP_NUMBER]"),
         ("ESP", "[ESP_NAME]"),
+        ("Suspect Name", "[SUSPECT_NAME]"),
+        ("Suspect Email", "[SUSPECT_EMAIL]"),
+        ("Suspect Phone", "[SUSPECT_PHONE]"),
+        ("Screen Name", "[SUSPECT_SCREEN_NAME]"),
+        ("Incident Date", "[INCIDENT_DATE]"),
+        ("Incident Type", "[INCIDENT_TYPE]"),
+        ("Evidence Count", "[EVIDENCE_COUNT]"),
     ]
     for label, snip in snippets:
         ttk.Button(toolbar, text=label,
@@ -639,8 +789,25 @@ def _build_add_new_tab(notebook: ttk.Notebook, stmts: StatementManager) -> None:
     def _apply_condition_from_string(cond: str):
         if not cond:
             cond_mode.set("always")
+            for _v in data_cond_vars.values():
+                _v.set(False)
+            return
+        data_keys = {v for v, _ in _data_conditions}
+        data_parts: Optional[List[str]] = None
+        if "&&" in cond:
+            cand = [p.strip() for p in cond.split("&&") if p.strip()]
+            if cand and all(p in data_keys or p.startswith("suspect_count") for p in cand):
+                data_parts = cand
+        elif cond in data_keys or cond.startswith("suspect_count"):
+            data_parts = [cond]
+        if data_parts is not None:
+            cond_mode.set("data")
+            for _k, _v in data_cond_vars.items():
+                _v.set(_k in data_parts)
             return
         cond_mode.set("specific")
+        for _v in data_cond_vars.values():
+            _v.set(False)
         values = re.findall(r'"([^"]*)"', cond)
         for name, var in esp_vars.items():
             var.set(name in values)
@@ -667,7 +834,7 @@ def _build_add_new_tab(notebook: ttk.Notebook, stmts: StatementManager) -> None:
             key_entry.focus_set()
             return
 
-        prefix = PLACEMENT_PREFIXES[placement_var.get()]
+        prefix = _add_all_prefixes.get(placement_var.get(), "")
         full_key = f"{prefix}{name}" if prefix else name
         if full_key in stmts.statements:
             messagebox.showwarning(
@@ -691,16 +858,26 @@ def _build_add_new_tab(notebook: ttk.Notebook, stmts: StatementManager) -> None:
                 "Either select ESP(s) in Step 3 or switch to 'Include in ALL reports'.",
             )
             return
+        if cond_mode.get() == "data" and not cond:
+            messagebox.showwarning(
+                "No Data Conditions Selected",
+                "You chose data conditions but didn't select any.\n"
+                "Select one or more checkboxes in Step 3 or switch to another option.",
+            )
+            return
 
         stmt_data = {
             "text": text,
             "condition": cond,
-            "order": order_var.get(),
             "formatting": _get_formatting(),
             "enabled": True,
         }
         stmts.statements[full_key] = stmt_data
         stmts.selected.add(full_key)
+
+        if manage_refresh_hooks:
+            for _hook in manage_refresh_hooks:
+                _hook()
 
         placement_label = placement_var.get()
         cond_label = cond_summary_var.get()
@@ -709,7 +886,6 @@ def _build_add_new_tab(notebook: ttk.Notebook, stmts: StatementManager) -> None:
             f"Successfully added:\n\n"
             f"Name: {name}\n"
             f"Location: {placement_label}\n"
-            f"Order: {order_var.get()}\n"
             f"{cond_label}",
         )
         _clear_form()
@@ -719,9 +895,10 @@ def _build_add_new_tab(notebook: ttk.Notebook, stmts: StatementManager) -> None:
         tmpl_desc_var.set("")
         key_entry.delete(0, tk.END)
         placement_var.set("At End of Report")
-        order_var.set(10)
         cond_mode.set("always")
         for var in esp_vars.values():
+            var.set(False)
+        for var in data_cond_vars.values():
             var.set(False)
         custom_esp_entry.delete(0, tk.END)
         add_text.delete(1.0, tk.END)
@@ -741,9 +918,15 @@ def _build_add_new_tab(notebook: ttk.Notebook, stmts: StatementManager) -> None:
 
 # ── Manage Custom Statements Tab (full overhaul) ─────────────────
 
-def _build_manage_tab(notebook: ttk.Notebook, stmts: StatementManager) -> None:
+def _build_manage_tab(
+    notebook: ttk.Notebook,
+    stmts: StatementManager,
+    template=None,
+    manage_refresh_hooks: Optional[List[Callable[[], None]]] = None,
+    tab_title: str = "Manage custom statements",
+) -> None:
     manage = ttk.Frame(notebook)
-    notebook.add(manage, text="Manage Custom Statements")
+    notebook.add(manage, text=tab_title)
 
     # Top: search
     top = ttk.Frame(manage)
@@ -760,54 +943,203 @@ def _build_manage_tab(notebook: ttk.Notebook, stmts: StatementManager) -> None:
     left = ttk.Frame(pane)
     pane.add(left, weight=1)
 
-    columns = ("key", "placement", "order", "enabled")
-    tree = ttk.Treeview(left, columns=columns, show="headings", height=12)
+    list_row = ttk.Frame(left)
+    list_row.pack(fill="both", expand=True)
+
+    columns = ("key", "placement", "enabled")
+    tree = ttk.Treeview(list_row, columns=columns, show="headings", height=12)
     tree.heading("key", text="Name")
     tree.heading("placement", text="Placement")
-    tree.heading("order", text="Order")
-    tree.heading("enabled", text="Enabled")
-    tree.column("key", width=180)
-    tree.column("placement", width=160)
-    tree.column("order", width=50, anchor="center")
-    tree.column("enabled", width=60, anchor="center")
-    tree.pack(fill="both", expand=True)
+    tree.heading("enabled", text="In reports?")
+    tree.column("key", width=200)
+    tree.column("placement", width=200)
+    tree.column("enabled", width=72, anchor="center")
+    tree.pack(side=tk.LEFT, fill="both", expand=True)
 
-    tree_sb = ttk.Scrollbar(left, orient="vertical", command=tree.yview)
+    tree_sb = ttk.Scrollbar(list_row, orient="vertical", command=tree.yview)
     tree.configure(yscrollcommand=tree_sb.set)
-    tree_sb.pack(side="right", fill="y")
+    tree_sb.pack(side=tk.RIGHT, fill=tk.Y)
 
-    # Right: editing panel
+    tk.Label(
+        left,
+        text="Select a statement, then use Statement actions (top right) to include, save, or remove it.",
+        font=("Arial", 8),
+        fg="gray",
+        wraplength=240,
+        justify=tk.LEFT,
+    ).pack(anchor="w", padx=2, pady=(4, 0))
+
+    # Right: scrollable editing panel (content can exceed window height)
     right = ttk.Frame(pane)
     pane.add(right, weight=2)
 
-    tk.Label(right, text="Statement Text:", font=("Arial", 10, "bold")).pack(anchor="w", pady=(5, 2))
-    edit_text = tk.Text(right, width=55, height=8, wrap="word", font=("Consolas", 10))
+    right_canvas = tk.Canvas(right, highlightthickness=0)
+    right_scroll = ttk.Scrollbar(right, orient="vertical", command=right_canvas.yview)
+    right_canvas.configure(yscrollcommand=right_scroll.set)
+    right_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+    right_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+    right_inner = ttk.Frame(right_canvas)
+    right_win = right_canvas.create_window((0, 0), window=right_inner, anchor="nw")
+
+    def _manage_right_on_inner_configure(_event=None):
+        right_canvas.configure(scrollregion=right_canvas.bbox("all"))
+
+    def _manage_right_on_canvas_configure(event):
+        # Match inner width to visible canvas so text wraps and horizontal scroll is not needed
+        pad = 8
+        right_canvas.itemconfig(right_win, width=max(1, event.width - pad))
+
+    right_inner.bind("<Configure>", _manage_right_on_inner_configure)
+    right_canvas.bind("<Configure>", _manage_right_on_canvas_configure)
+
+    def _manage_right_mousewheel(event):
+        right_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+    right_canvas.bind("<MouseWheel>", _manage_right_mousewheel)
+
+    def _bind_manage_panel_mousewheel(widget):
+        # Do not steal wheel from text fields, spinboxes, or comboboxes.
+        if isinstance(widget, (tk.Text, tk.Entry, tk.Spinbox, ttk.Combobox)):
+            for ch in widget.winfo_children():
+                _bind_manage_panel_mousewheel(ch)
+            return
+        widget.bind("<MouseWheel>", _manage_right_mousewheel)
+        for ch in widget.winfo_children():
+            _bind_manage_panel_mousewheel(ch)
+
+    actions_top = ttk.LabelFrame(right_inner, text="  Statement actions  ", padding=8)
+    actions_top.pack(fill="x", pady=(0, 8))
+
+    tk.Label(right_inner, text="Statement text:", font=("Arial", 10, "bold")).pack(anchor="w", pady=(5, 2))
+    edit_text = tk.Text(right_inner, width=55, height=8, wrap="word", font=("Consolas", 10))
     edit_text.pack(fill="x", pady=2)
 
-    # Condition editor
-    cond_frame = ttk.LabelFrame(right, text="  Condition  ", padding=5)
+    # Condition editor (ESP checkbox UI)
+    cond_frame = ttk.LabelFrame(right_inner, text="  Condition  ", padding=5)
     cond_frame.pack(fill="x", pady=5)
-    tk.Label(cond_frame, text="Raw condition string:").pack(anchor="w")
-    cond_entry = tk.Entry(cond_frame, width=50)
-    cond_entry.pack(fill="x", pady=2)
-    tk.Label(cond_frame, text='Leave blank for "all reports". e.g. esp_name == "Facebook"', fg="gray").pack(anchor="w")
+
+    m_cond_mode = tk.StringVar(value="always")
+    tk.Radiobutton(cond_frame, text="All reports", variable=m_cond_mode, value="always").pack(anchor="w")
+    tk.Radiobutton(cond_frame, text="Specific ESP(s):", variable=m_cond_mode, value="specific").pack(anchor="w")
+
+    m_esp_check_frame = ttk.Frame(cond_frame)
+    m_esp_check_frame.pack(fill="x", padx=15, pady=2)
+    m_esp_vars: Dict[str, tk.BooleanVar] = {}
+    _col_count = 3
+    for _i, _esp in enumerate(_ESP_LIST):
+        _var = tk.BooleanVar(value=False)
+        m_esp_vars[_esp] = _var
+        _r, _c = divmod(_i, _col_count)
+        ttk.Checkbutton(m_esp_check_frame, text=_esp, variable=_var).grid(row=_r, column=_c, sticky="w", padx=3, pady=1)
+
+    m_custom_esp_row = ttk.Frame(cond_frame)
+    m_custom_esp_row.pack(fill="x", padx=15)
+    tk.Label(m_custom_esp_row, text="Other ESP:").pack(side=tk.LEFT, padx=(0, 3))
+    m_custom_esp = tk.Entry(m_custom_esp_row, width=20)
+    m_custom_esp.pack(side=tk.LEFT)
+
+    tk.Radiobutton(
+        cond_frame,
+        text="Data condition(s) — all selected must match:",
+        variable=m_cond_mode,
+        value="data",
+    ).pack(anchor="w", pady=(6, 0))
+    m_data_cond_frame = ttk.Frame(cond_frame)
+    m_data_cond_frame.pack(fill="x", padx=15, pady=2)
+    _m_data_conditions = [
+        ("has_evidence", "Report has evidence files"),
+        ("has_ips", "Report has IP addresses"),
+        ("is_multi_tip", "Analyzing multiple CyberTips"),
+        ("suspect_count > 1", "More than one suspect"),
+    ]
+    m_data_cond_vars: Dict[str, tk.BooleanVar] = {}
+    for _dc_val, _dc_label in _m_data_conditions:
+        _mdv = tk.BooleanVar(value=False)
+        m_data_cond_vars[_dc_val] = _mdv
+        ttk.Checkbutton(m_data_cond_frame, text=_dc_label, variable=_mdv).pack(anchor="w")
+
+    def _m_get_condition() -> str:
+        mode = m_cond_mode.get()
+        if mode == "always":
+            return ""
+        if mode == "data":
+            parts = [val for val, _ in _m_data_conditions if m_data_cond_vars[val].get()]
+            if not parts:
+                return ""
+            return "&&".join(parts)
+        selected = [name for name, var in m_esp_vars.items() if var.get()]
+        custom = m_custom_esp.get().strip()
+        if custom:
+            selected.append(custom)
+        if not selected:
+            return ""
+        if len(selected) == 1:
+            return f'esp_name == "{selected[0]}"'
+        quoted = ", ".join('"' + v + '"' for v in selected)
+        return f"esp_name in [{quoted}]"
+
+    def _m_apply_condition(cond: str):
+        if not cond:
+            m_cond_mode.set("always")
+            for var in m_esp_vars.values():
+                var.set(False)
+            for _v in m_data_cond_vars.values():
+                _v.set(False)
+            m_custom_esp.delete(0, tk.END)
+            return
+        _m_data_keys = {v for v, _ in _m_data_conditions}
+        data_parts: Optional[List[str]] = None
+        if "&&" in cond:
+            cand = [p.strip() for p in cond.split("&&") if p.strip()]
+            if cand and all(p in _m_data_keys or p.startswith("suspect_count") for p in cand):
+                data_parts = cand
+        elif cond in _m_data_keys or cond.startswith("suspect_count"):
+            data_parts = [cond]
+        if data_parts is not None:
+            m_cond_mode.set("data")
+            for _k, _v in m_data_cond_vars.items():
+                _v.set(_k in data_parts)
+            for var in m_esp_vars.values():
+                var.set(False)
+            m_custom_esp.delete(0, tk.END)
+            return
+        m_cond_mode.set("specific")
+        for _v in m_data_cond_vars.values():
+            _v.set(False)
+        values = re.findall(r'"([^"]*)"', cond)
+        for name, var in m_esp_vars.items():
+            var.set(name in values)
+        remaining = [v for v in values if v not in m_esp_vars]
+        m_custom_esp.delete(0, tk.END)
+        if remaining:
+            m_custom_esp.insert(0, remaining[0])
 
     # Placement reassignment
-    place_frame = ttk.LabelFrame(right, text="  Placement  ", padding=5)
+    place_frame = ttk.LabelFrame(right_inner, text="  Placement in report  ", padding=5)
     place_frame.pack(fill="x", pady=5)
+    _manage_all_prefixes = get_all_placement_prefixes(template)
     manage_place_var = tk.StringVar(value="At End of Report")
-    ttk.Combobox(place_frame, textvariable=manage_place_var, values=list(PLACEMENT_PREFIXES.keys()),
-                 state="readonly", width=35).pack(fill="x", pady=2)
-
-    # Order
-    order_frame = ttk.Frame(right)
-    order_frame.pack(fill="x", pady=3)
-    tk.Label(order_frame, text="Display Order:").pack(side=tk.LEFT, padx=(0, 5))
-    manage_order_var = tk.IntVar(value=10)
-    tk.Spinbox(order_frame, from_=1, to=999, textvariable=manage_order_var, width=5).pack(side=tk.LEFT)
+    ttk.Combobox(
+        place_frame,
+        textvariable=manage_place_var,
+        values=list(_manage_all_prefixes.keys()),
+        state="readonly",
+        width=48,
+    ).pack(fill="x", pady=2)
+    manage_place_desc_var = tk.StringVar(value=_placement_description("At End of Report"))
+    tk.Label(
+        place_frame,
+        textvariable=manage_place_desc_var,
+        fg="gray",
+        wraplength=520,
+        justify=tk.LEFT,
+        font=("Arial", 8),
+    ).pack(anchor="w", pady=(2, 0))
+    manage_place_var.trace_add("write", lambda *_: manage_place_desc_var.set(_placement_description(manage_place_var.get())))
 
     # Formatting
-    fmt_frame = ttk.LabelFrame(right, text="  Formatting  ", padding=5)
+    fmt_frame = ttk.LabelFrame(right_inner, text="  Formatting  ", padding=5)
     fmt_frame.pack(fill="x", pady=5)
     fmt_r1 = ttk.Frame(fmt_frame)
     fmt_r1.pack(fill="x", pady=2)
@@ -829,23 +1161,51 @@ def _build_manage_tab(notebook: ttk.Notebook, stmts: StatementManager) -> None:
     ttk.Combobox(fmt_r2, textvariable=m_highlight, values=HIGHLIGHT_OPTIONS, state="readonly", width=12).pack(side=tk.LEFT)
 
     _selected_key = tk.StringVar(value="")
+    m_include_var = tk.BooleanVar(value=False)
+    _syncing_include = False
 
     def _refresh_tree(q=""):
         tree.delete(*tree.get_children())
         custom = {k: v for k, v in stmts.statements.items() if k not in DEFAULT_STATEMENTS}
-        for key in sorted(custom, key=lambda k: (stmts.get_order(k), k)):
+        for key in sorted(custom, key=lambda k: k.lower()):
             val = custom[key]
             text_val = val["text"] if isinstance(val, dict) else val
             if q and q.lower() not in key.lower() and q.lower() not in text_val.lower():
                 continue
-            placement = stmts.get_placement_label(key)
-            order = stmts.get_order(key)
+            placement = stmts.get_placement_label(key, template=template)
             enabled = key in stmts.selected
-            tree.insert("", tk.END, iid=key, values=(key, placement, order, "Yes" if enabled else "No"))
+            tree.insert("", tk.END, iid=key, values=(key, placement, "Yes" if enabled else "No"))
+
+    def _sync_include_from_selection():
+        nonlocal _syncing_include
+        key = _selected_key.get()
+        _syncing_include = True
+        try:
+            m_include_var.set(bool(key and key in stmts.selected))
+        finally:
+            _syncing_include = False
+
+    def _on_include_toggle():
+        nonlocal _syncing_include
+        if _syncing_include:
+            return
+        key = _selected_key.get()
+        if not key or key not in stmts.statements:
+            return
+        if m_include_var.get():
+            stmts.selected.add(key)
+        else:
+            stmts.selected.discard(key)
+        val = stmts.statements.get(key)
+        if isinstance(val, dict):
+            val["enabled"] = m_include_var.get()
+        _refresh_tree(search_var.get())
 
     def _on_tree_select(event=None):
         sel = tree.selection()
         if not sel:
+            _selected_key.set("")
+            _sync_include_from_selection()
             return
         key = sel[0]
         _selected_key.set(key)
@@ -856,9 +1216,7 @@ def _build_manage_tab(notebook: ttk.Notebook, stmts: StatementManager) -> None:
         edit_text.delete(1.0, tk.END)
         if isinstance(val, dict):
             edit_text.insert(tk.END, val.get("text", ""))
-            cond_entry.delete(0, tk.END)
-            cond_entry.insert(0, val.get("condition", ""))
-            manage_order_var.set(val.get("order", 10))
+            _m_apply_condition(val.get("condition", ""))
             fmt = val.get("formatting", {})
             m_fontsize.set(fmt.get("font_size", 12))
             m_bold.set(fmt.get("bold", False))
@@ -867,23 +1225,19 @@ def _build_manage_tab(notebook: ttk.Notebook, stmts: StatementManager) -> None:
             m_highlight.set(fmt.get("highlight", "") or "(none)")
         else:
             edit_text.insert(tk.END, val)
-            cond_entry.delete(0, tk.END)
-            manage_order_var.set(10)
+            _m_apply_condition("")
             m_fontsize.set(12)
             m_bold.set(False)
             m_italic.set(False)
             m_indent.set(0.0)
             m_highlight.set("(none)")
 
-        current_placement = stmts.get_placement_label(key)
+        current_placement = stmts.get_placement_label(key, template=template)
         manage_place_var.set(current_placement)
+        _sync_include_from_selection()
 
     tree.bind("<<TreeviewSelect>>", _on_tree_select)
     search_var.trace("w", lambda *_: _refresh_tree(search_var.get()))
-
-    # Action buttons
-    actions = ttk.Frame(right)
-    actions.pack(fill="x", pady=5)
 
     def _save_edits():
         key = _selected_key.get()
@@ -896,12 +1250,26 @@ def _build_manage_tab(notebook: ttk.Notebook, stmts: StatementManager) -> None:
             messagebox.showwarning("Warning", "Statement text cannot be empty.")
             return
 
-        new_placement_label = manage_place_var.get()
-        new_prefix = PLACEMENT_PREFIXES.get(new_placement_label, "")
+        if m_cond_mode.get() == "specific" and not _m_get_condition():
+            messagebox.showwarning(
+                "Warning",
+                "Specific ESP(s) is selected but no ESP is checked. "
+                "Select ESP(s) or choose another condition mode.",
+            )
+            return
+        if m_cond_mode.get() == "data" and not _m_get_condition():
+            messagebox.showwarning(
+                "Warning",
+                "Data condition(s) is selected but none are checked. "
+                "Select one or more conditions or choose another mode.",
+            )
+            return
 
-        # Extract the bare name (strip old prefix)
+        new_placement_label = manage_place_var.get()
+        new_prefix = _manage_all_prefixes.get(new_placement_label, "")
+
         bare_name = key
-        for pfx in sorted(PLACEMENT_PREFIXES.values(), key=len, reverse=True):
+        for pfx in sorted(_manage_all_prefixes.values(), key=len, reverse=True):
             if pfx and key.startswith(pfx):
                 bare_name = key[len(pfx):]
                 break
@@ -910,8 +1278,7 @@ def _build_manage_tab(notebook: ttk.Notebook, stmts: StatementManager) -> None:
 
         new_val = {
             "text": new_text,
-            "condition": cond_entry.get().strip(),
-            "order": manage_order_var.get(),
+            "condition": _m_get_condition(),
             "formatting": {
                 "font_size": m_fontsize.get(),
                 "bold": m_bold.get(),
@@ -934,47 +1301,48 @@ def _build_manage_tab(notebook: ttk.Notebook, stmts: StatementManager) -> None:
 
         messagebox.showinfo("Saved", f"Statement '{bare_name}' updated.")
         _refresh_tree(search_var.get())
-
-    def _toggle_enabled():
-        key = _selected_key.get()
-        if not key:
-            return
-        if key in stmts.selected:
-            stmts.selected.discard(key)
-        else:
-            stmts.selected.add(key)
-        val = stmts.statements.get(key)
-        if isinstance(val, dict):
-            val["enabled"] = key in stmts.selected
-        _refresh_tree(search_var.get())
+        _sync_include_from_selection()
 
     def _delete_stmt():
         key = _selected_key.get()
         if not key:
+            messagebox.showinfo("Delete", "Select a statement in the list first.")
             return
-        if messagebox.askyesno("Confirm", f"Delete statement '{key}'?"):
+        if messagebox.askyesno("Delete statement", f"Permanently remove this custom statement?\n\n{key}"):
             del stmts.statements[key]
             stmts.selected.discard(key)
             _selected_key.set("")
             edit_text.delete(1.0, tk.END)
-            cond_entry.delete(0, tk.END)
+            _m_apply_condition("")
+            _sync_include_from_selection()
             _refresh_tree(search_var.get())
 
-    def _move_order(delta: int):
-        key = _selected_key.get()
-        if not key:
-            return
-        val = stmts.statements.get(key)
-        if isinstance(val, dict):
-            val["order"] = max(1, val.get("order", 10) + delta)
-            manage_order_var.set(val["order"])
-        _refresh_tree(search_var.get())
+    ttk.Checkbutton(
+        actions_top,
+        text="Include this statement in generated reports",
+        variable=m_include_var,
+        command=_on_include_toggle,
+    ).pack(anchor="w")
 
-    ttk.Button(actions, text="Save Changes", command=_save_edits).pack(side=tk.LEFT, padx=3)
-    ttk.Button(actions, text="Toggle Enabled", command=_toggle_enabled).pack(side=tk.LEFT, padx=3)
-    ttk.Button(actions, text="Delete", command=_delete_stmt).pack(side=tk.LEFT, padx=3)
-    ttk.Button(actions, text="Move Up", command=lambda: _move_order(-1)).pack(side=tk.LEFT, padx=3)
-    ttk.Button(actions, text="Move Down", command=lambda: _move_order(1)).pack(side=tk.LEFT, padx=3)
+    act_btn_row = ttk.Frame(actions_top)
+    act_btn_row.pack(fill="x", pady=(6, 0))
+    ttk.Button(act_btn_row, text="Save changes", command=_save_edits).pack(side=tk.LEFT, padx=(0, 6))
+    ttk.Button(act_btn_row, text="Delete statement", command=_delete_stmt).pack(side=tk.LEFT, padx=6)
+
+    tk.Label(
+        actions_top,
+        text="Uncheck to disable without deleting. Use Placement below to move this statement. "
+             "If several share one placement, they are ordered A to Z by name. Scroll the right panel to see all options.",
+        font=("Arial", 8),
+        fg="gray",
+        wraplength=480,
+        justify=tk.LEFT,
+    ).pack(anchor="w", pady=(8, 0))
+
+    _bind_manage_panel_mousewheel(right_inner)
+
+    if manage_refresh_hooks is not None:
+        manage_refresh_hooks.append(lambda: _refresh_tree(search_var.get()))
 
     _refresh_tree()
 
@@ -1055,12 +1423,217 @@ SECTION_LABELS = {
 def show_template_dialog(root: tk.Tk, template: ReportTemplate) -> None:
     dialog = tk.Toplevel(root)
     dialog.title("Report Template Settings")
-    dialog.geometry("750x700")
+    dialog.geometry("750x750")
     dialog.transient(root)
     dialog.grab_set()
 
+    # ── Profile Management Bar ────────────────────────────────────
+    profile_bar = ttk.LabelFrame(
+        dialog,
+        text="  Default & custom report templates  ",
+        padding=5,
+    )
+    profile_bar.pack(fill="x", padx=10, pady=(10, 5))
+
+    tk.Label(
+        profile_bar,
+        text="Default is the standard layout (its own file). Custom templates are separate files—"
+             "editing or saving one never changes another until you choose that template and save.",
+        font=("Arial", 9),
+        wraplength=680,
+        justify=tk.LEFT,
+    ).pack(anchor="w", padx=2, pady=(0, 6))
+
+    profile_row = ttk.Frame(profile_bar)
+    profile_row.pack(fill="x")
+    tk.Label(profile_row, text="Template in editor:").pack(side=tk.LEFT, padx=(0, 5))
+
+    active_profile: str = (template.name or "Default").strip() or "Default"
+    template.name = active_profile
+
+    suppress_profile_pick = False
+
+    _profiles = ReportTemplate.combobox_profile_names()
+    profile_var = tk.StringVar(value=active_profile)
+    profile_cb = ttk.Combobox(profile_row, textvariable=profile_var,
+                              values=_profiles, width=22)
+    profile_cb.pack(side=tk.LEFT, padx=3)
+
+    tk.Label(
+        profile_bar,
+        text="Choosing a template in the list loads it from disk into the editor. "
+             "Use the tabs below to change section order, names, and custom sections. "
+             "Save and Close writes only the template shown above. "
+             "Create Custom Template saves a copy of what you see now under a new name and switches you to it—"
+             "the previous template file is left unchanged on disk.",
+        font=("Arial", 8),
+        fg="gray",
+        wraplength=680,
+        justify=tk.LEFT,
+    ).pack(anchor="w", padx=2, pady=(6, 4))
+
+    profile_btn_row = ttk.Frame(profile_bar)
+    profile_btn_row.pack(fill="x", pady=(0, 2))
+
+    def _refresh_profile_list():
+        nonlocal _profiles
+        _profiles = ReportTemplate.combobox_profile_names()
+        profile_cb["values"] = _profiles
+
+    def _set_profile_var_quiet(value: str) -> None:
+        nonlocal suppress_profile_pick
+        suppress_profile_pick = True
+        try:
+            profile_var.set(value)
+        finally:
+            suppress_profile_pick = False
+
+    def _load_template_by_name(name: str, *, revert_combo_on_error: bool = True) -> bool:
+        """Load *name* from disk into the shared *template*. Returns True on success."""
+        nonlocal active_profile
+        name = (name or "").strip() or "Default"
+        try:
+            loaded = ReportTemplate.load_profile(name)
+            template.name = loaded.name
+            active_profile = template.name
+            template.section_order = loaded.section_order
+            template.section_visible = loaded.section_visible
+            template.section_names = loaded.section_names
+            template.custom_sections = loaded.custom_sections
+            template.sync_custom_sections()
+            _set_profile_var_quiet(active_profile)
+            _refresh_all()
+            return True
+        except FileNotFoundError:
+            messagebox.showwarning("Not found", f"Template '{name}' does not exist on disk.")
+            if revert_combo_on_error:
+                _set_profile_var_quiet(active_profile)
+            return False
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load template: {e}")
+            if revert_combo_on_error:
+                _set_profile_var_quiet(active_profile)
+            return False
+
+    def _on_profile_combobox_selected(event=None):
+        if suppress_profile_pick:
+            return
+        name = (profile_var.get() or "").strip() or "Default"
+        if name.casefold() == active_profile.casefold():
+            return
+        _load_template_by_name(name, revert_combo_on_error=True)
+
+    def _on_profile_combobox_return(event=None):
+        _on_profile_combobox_selected()
+
+    def _create_new_profile():
+        nonlocal active_profile
+        current_sel = (profile_var.get() or "").strip() or "Default"
+        name = simpledialog.askstring(
+            "Create custom report template",
+            "Name for the new custom template (a copy of the layout you see now).\n"
+            "The built-in Default template keeps its own name; pick another name here.",
+            parent=dialog,
+            initialvalue="",
+        )
+        if name is None:
+            return
+        name = name.strip()
+        if not name:
+            messagebox.showwarning("Warning", "Template name cannot be empty.")
+            return
+        if name.casefold() == "default":
+            messagebox.showinfo(
+                "Reserved name",
+                "'Default' is the built-in standard template.\n\n"
+                "To reset it to the original layout, use Restore Default to Original below.\n"
+                "For a new layout, choose a different name for your custom template.",
+            )
+            return
+        if name.casefold() == current_sel.casefold():
+            messagebox.showinfo(
+                "Same name as current template",
+                f"Choose a different name than '{current_sel}', or use Save and Close to update that file.",
+            )
+            return
+        if name in ReportTemplate.list_profiles():
+            if not messagebox.askyesno(
+                "Overwrite?",
+                f"A profile named '{name}' already exists.\n\nOverwrite it with the current layout?",
+            ):
+                return
+        for sid, ent in name_entries.items():
+            template.section_names[sid] = ent.get().strip() or DEFAULT_SECTION_NAMES.get(sid, sid.upper().replace("_", " "))
+        template.name = current_sel
+        payload = template.to_dict()
+        try:
+            ReportTemplate.save_payload_as_named_profile(payload, name)
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not create profile: {e}")
+            return
+        _refresh_profile_list()
+        try:
+            loaded = ReportTemplate.load_profile(name)
+            template.name = loaded.name
+            active_profile = template.name
+            template.section_order = loaded.section_order
+            template.section_visible = loaded.section_visible
+            template.section_names = loaded.section_names
+            template.custom_sections = loaded.custom_sections
+            template.sync_custom_sections()
+            _set_profile_var_quiet(active_profile)
+            _refresh_all()
+        except Exception as e:
+            messagebox.showerror("Error", f"Profile file was written but could not be opened: {e}")
+            return
+        messagebox.showinfo(
+            "Custom template created",
+            f"Custom template '{name}' was saved. You are now editing '{name}'.\n\n"
+            f"'{current_sel}' on disk was not changed.",
+        )
+
+    def _delete_profile():
+        nonlocal active_profile
+        name = profile_var.get().strip()
+        if not name or name == "Default":
+            messagebox.showwarning("Warning", "The built-in Default template cannot be deleted.")
+            return
+        if not messagebox.askyesno("Confirm", f"Delete custom template '{name}'?"):
+            return
+        ReportTemplate.delete_profile(name)
+        _refresh_profile_list()
+        if name.casefold() == active_profile.casefold():
+            try:
+                loaded = ReportTemplate.load_profile("Default")
+                template.name = loaded.name
+                active_profile = template.name
+                template.section_order = loaded.section_order
+                template.section_visible = loaded.section_visible
+                template.section_names = loaded.section_names
+                template.custom_sections = loaded.custom_sections
+                template.sync_custom_sections()
+            except FileNotFoundError:
+                template.section_order = list(DEFAULT_SECTIONS)
+                template.section_visible = {s: True for s in DEFAULT_SECTIONS}
+                template.section_names = dict(DEFAULT_SECTION_NAMES)
+                template.custom_sections = []
+                template.sync_custom_sections()
+                template.name = "Default"
+                active_profile = "Default"
+                try:
+                    template.save_profile()
+                except Exception:
+                    pass
+            _set_profile_var_quiet(active_profile)
+            _refresh_all()
+        else:
+            _set_profile_var_quiet(active_profile)
+
+    ttk.Button(profile_row, text="Create Custom Template", command=_create_new_profile).pack(side=tk.LEFT, padx=(8, 0))
+    ttk.Button(profile_btn_row, text="Delete Template", command=_delete_profile).pack(side=tk.LEFT, padx=(0, 4))
+
     notebook = ttk.Notebook(dialog)
-    notebook.pack(fill="both", expand=True, padx=10, pady=10)
+    notebook.pack(fill="both", expand=True, padx=10, pady=(5, 10))
 
     # ── Tab 1: Section Order & Visibility ─────────────────────────
     tab_order = ttk.Frame(notebook)
@@ -1129,25 +1702,36 @@ def show_template_dialog(root: tk.Tk, template: ReportTemplate) -> None:
     tk.Label(tab_rename, text="Customize the header text for each report section.",
              wraplength=600).pack(pady=10)
 
-    name_entries: Dict[str, tk.Entry] = {}
-    for section_id in DEFAULT_SECTIONS:
-        row = ttk.Frame(tab_rename)
-        row.pack(fill="x", padx=20, pady=4)
-        default_label = SECTION_LABELS.get(section_id, section_id)
-        tk.Label(row, text=f"{default_label}:", width=22, anchor="w").pack(side=tk.LEFT)
-        ent = tk.Entry(row, width=40)
-        ent.pack(side=tk.LEFT, padx=5)
-        ent.insert(0, template.section_names.get(section_id, DEFAULT_SECTION_NAMES.get(section_id, "")))
-        name_entries[section_id] = ent
+    names_container = ttk.Frame(tab_rename)
+    names_container.pack(fill="both", expand=True)
 
-        def _reset_name(sid=section_id, entry=ent):
-            entry.delete(0, tk.END)
-            entry.insert(0, DEFAULT_SECTION_NAMES.get(sid, ""))
-        tk.Button(row, text="Reset", command=_reset_name).pack(side=tk.LEFT, padx=5)
+    name_entries: Dict[str, tk.Entry] = {}
+
+    def _rebuild_name_entries():
+        for w in names_container.winfo_children():
+            w.destroy()
+        name_entries.clear()
+        for section_id in template.section_order:
+            row = ttk.Frame(names_container)
+            row.pack(fill="x", padx=20, pady=4)
+            default_label = SECTION_LABELS.get(section_id, section_id.replace("_", " ").title())
+            tk.Label(row, text=f"{default_label}:", width=22, anchor="w").pack(side=tk.LEFT)
+            ent = tk.Entry(row, width=40)
+            ent.pack(side=tk.LEFT, padx=5)
+            ent.insert(0, template.section_names.get(section_id, DEFAULT_SECTION_NAMES.get(section_id, "")))
+            name_entries[section_id] = ent
+
+            default_val = DEFAULT_SECTION_NAMES.get(section_id, "")
+            def _reset_name(sid=section_id, entry=ent, dv=default_val):
+                entry.delete(0, tk.END)
+                entry.insert(0, dv)
+            tk.Button(row, text="Reset", command=_reset_name).pack(side=tk.LEFT, padx=5)
+
+    _rebuild_name_entries()
 
     def _apply_names():
         for sid, ent in name_entries.items():
-            template.section_names[sid] = ent.get().strip() or DEFAULT_SECTION_NAMES.get(sid, "")
+            template.section_names[sid] = ent.get().strip() or DEFAULT_SECTION_NAMES.get(sid, sid.upper().replace("_", " "))
         _refresh_listbox()
         messagebox.showinfo("Applied", "Section names updated.")
 
@@ -1178,6 +1762,13 @@ def show_template_dialog(root: tk.Tk, template: ReportTemplate) -> None:
     cs_name_entry.pack(side=tk.LEFT)
 
     tk.Label(tab_custom, text="Section Body (supports placeholders):").pack(anchor="w", padx=20)
+    tk.Label(tab_custom,
+             text="Available: [CURRENT_DATE] [INVESTIGATOR_NAME] [INVESTIGATOR_TITLE] "
+                  "[CYBERTIP_NUMBER] [ESP_NAME] [REPORT_DATE_RECEIVED] [SUSPECT_NAME] "
+                  "[SUSPECT_EMAIL] [SUSPECT_PHONE] [SUSPECT_SCREEN_NAME] "
+                  "[INCIDENT_DATE] [INCIDENT_TYPE] [EVIDENCE_COUNT] "
+                  "[TOTAL_FILES] [TOTAL_IPS] [AGENCY_NAME] [CASE_NUMBER]",
+             fg="gray", wraplength=550, font=("Arial", 8)).pack(anchor="w", padx=20)
     cs_body = tk.Text(tab_custom, width=60, height=6, wrap="word")
     cs_body.pack(fill="x", padx=20, pady=5)
 
@@ -1188,20 +1779,45 @@ def show_template_dialog(root: tk.Tk, template: ReportTemplate) -> None:
             messagebox.showwarning("Warning", "Enter a section name.")
             return
         template.custom_sections.append({"name": name, "body": body})
+        template.sync_custom_sections()
         cs_name_entry.delete(0, tk.END)
         cs_body.delete(1.0, tk.END)
         _refresh_cs_list()
+        _refresh_listbox()
+        _rebuild_name_entries()
+
+    def _edit_custom_section():
+        sel = cs_list.curselection()
+        if not sel:
+            messagebox.showwarning("Warning", "Select a custom section to edit.")
+            return
+        cs = template.custom_sections[sel[0]]
+        cs_name_entry.delete(0, tk.END)
+        cs_name_entry.insert(0, cs.get("name", ""))
+        cs_body.delete(1.0, tk.END)
+        cs_body.insert(tk.END, cs.get("body", ""))
+        template.custom_sections.pop(sel[0])
+        template.sync_custom_sections()
+        _refresh_cs_list()
+        _refresh_listbox()
+        _rebuild_name_entries()
 
     def _remove_custom_section():
         sel = cs_list.curselection()
         if not sel:
             return
+        if not messagebox.askyesno("Confirm", f"Remove custom section '{template.custom_sections[sel[0]].get('name', '')}'?"):
+            return
         template.custom_sections.pop(sel[0])
+        template.sync_custom_sections()
         _refresh_cs_list()
+        _refresh_listbox()
+        _rebuild_name_entries()
 
     cs_btns = ttk.Frame(tab_custom)
     cs_btns.pack(fill="x", padx=20, pady=5)
     ttk.Button(cs_btns, text="Add Section", command=_add_custom_section).pack(side=tk.LEFT, padx=3)
+    ttk.Button(cs_btns, text="Edit Selected", command=_edit_custom_section).pack(side=tk.LEFT, padx=3)
     ttk.Button(cs_btns, text="Remove Selected", command=_remove_custom_section).pack(side=tk.LEFT, padx=3)
 
     # ── Tab 4: Preview ────────────────────────────────────────────
@@ -1231,14 +1847,15 @@ def show_template_dialog(root: tk.Tk, template: ReportTemplate) -> None:
             marker = "" if visible else "  [HIDDEN]"
             lines.append(f"{'─' * 40}")
             lines.append(f"{name}:{marker}")
-            lines.append(f"  (content for {SECTION_LABELS.get(section, section)})")
-            lines.append("")
-
-        for cs in template.custom_sections:
-            lines.append(f"{'─' * 40}")
-            lines.append(f"{cs.get('name', 'CUSTOM').upper()}:")
-            body_preview = cs.get("body", "")[:80]
-            lines.append(f"  {body_preview}{'...' if len(cs.get('body', '')) > 80 else ''}")
+            if section.startswith("custom_"):
+                cs = template.get_custom_section_by_id(section)
+                if cs:
+                    body_preview = cs.get("body", "")[:80]
+                    lines.append(f"  {body_preview}{'...' if len(cs.get('body', '')) > 80 else ''}")
+                else:
+                    lines.append(f"  (custom section content)")
+            else:
+                lines.append(f"  (content for {SECTION_LABELS.get(section, section)})")
             lines.append("")
 
         lines.append("─" * 40)
@@ -1253,71 +1870,405 @@ def show_template_dialog(root: tk.Tk, template: ReportTemplate) -> None:
     ttk.Button(tab_preview, text="Refresh Preview", command=_refresh_preview).pack(pady=5)
     _refresh_preview()
 
-    # ── Bottom buttons ────────────────────────────────────────────
-    bottom = ttk.Frame(dialog)
-    bottom.pack(fill="x", padx=10, pady=10)
+    def _on_tab_changed(event=None):
+        if notebook.index(notebook.select()) == notebook.index(tab_preview):
+            _refresh_preview()
+    notebook.bind("<<NotebookTabChanged>>", _on_tab_changed)
 
-    def reset():
-        template.section_order = list(DEFAULT_SECTIONS)
-        template.section_visible = {s: True for s in DEFAULT_SECTIONS}
-        template.section_names = dict(DEFAULT_SECTION_NAMES)
-        template.custom_sections = []
+    def _refresh_all():
         _refresh_listbox()
-        for sid, ent in name_entries.items():
-            ent.delete(0, tk.END)
-            ent.insert(0, DEFAULT_SECTION_NAMES.get(sid, ""))
+        _rebuild_name_entries()
         _refresh_cs_list()
         _refresh_preview()
 
+    profile_cb.bind("<<ComboboxSelected>>", _on_profile_combobox_selected)
+    profile_cb.bind("<Return>", _on_profile_combobox_return)
+
+    def _edit_template():
+        sel = (profile_var.get() or "").strip() or "Default"
+        if sel.casefold() != active_profile.casefold():
+            if not _load_template_by_name(sel, revert_combo_on_error=True):
+                return
+        notebook.select(0)
+
+    ttk.Button(profile_btn_row, text="Edit Template", command=_edit_template).pack(side=tk.LEFT, padx=4)
+
+    # ── Bottom buttons ────────────────────────────────────────────
+    bottom = ttk.Frame(dialog)
+    bottom.pack(fill="x", padx=10, pady=10)
+    tk.Label(
+        bottom,
+        text="Restore Default to Original resets only the built-in Default template file to factory section order and names. "
+             "If you are editing Default, the screen updates; custom templates you have open are not changed.",
+        font=("Arial", 8),
+        fg="gray",
+        wraplength=700,
+        justify=tk.LEFT,
+    ).pack(anchor="w", fill="x", pady=(0, 6))
+
+    def _reset_default_profile():
+        nonlocal active_profile
+        sel = (profile_var.get() or "").strip() or "Default"
+        try:
+            ReportTemplate.write_factory_default_file()
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not restore the Default template on disk: {e}")
+            return
+        if sel.casefold() == "default":
+            try:
+                loaded = ReportTemplate.load_profile("Default")
+                template.name = loaded.name
+                active_profile = template.name
+                template.section_order = loaded.section_order
+                template.section_visible = loaded.section_visible
+                template.section_names = loaded.section_names
+                template.custom_sections = loaded.custom_sections
+                template.sync_custom_sections()
+            except Exception as e:
+                messagebox.showerror("Error", f"Default.json was written but could not be reloaded: {e}")
+                return
+            _set_profile_var_quiet(active_profile)
+            _refresh_all()
+            messagebox.showinfo(
+                "Default restored",
+                "The Default template was reset to the original built-in layout. The editor now matches.",
+            )
+        else:
+            messagebox.showinfo(
+                "Default restored",
+                "The Default template file was reset to the original built-in layout.\n\n"
+                f"Your custom template '{sel}' in the editor is unchanged.",
+            )
+
     def save_and_close():
-        _apply_names()
-        messagebox.showinfo("Success", "Template settings saved.")
+        nonlocal active_profile
+        sel = (profile_var.get() or "").strip() or "Default"
+        active_profile = sel
+        template.name = active_profile
+        for sid, ent in name_entries.items():
+            template.section_names[sid] = ent.get().strip() or DEFAULT_SECTION_NAMES.get(sid, sid.upper().replace("_", " "))
+        _refresh_listbox()
+        template.sync_custom_sections()
+        template.save_profile()
+        _refresh_profile_list()
+        messagebox.showinfo(f"Saved: {active_profile}", f"Template profile '{active_profile}' saved.")
         dialog.destroy()
 
-    ttk.Button(bottom, text="Reset to Default", command=reset).pack(side=tk.LEFT, padx=5)
+    def _export_template():
+        path = filedialog.asksaveasfilename(
+            title="Export Template", defaultextension=".json",
+            filetypes=[("JSON files", "*.json")],
+        )
+        if path:
+            try:
+                template.export_to_file(path)
+                messagebox.showinfo("Exported", f"Template exported to:\n{path}")
+            except Exception as e:
+                messagebox.showerror("Error", f"Export failed: {e}")
+
+    def _import_template():
+        nonlocal active_profile
+        path = filedialog.askopenfilename(
+            title="Import Template", filetypes=[("JSON files", "*.json")],
+        )
+        if not path:
+            return
+        try:
+            loaded = ReportTemplate.import_from_file(path)
+            template.name = loaded.name
+            active_profile = template.name
+            template.section_order = loaded.section_order
+            template.section_visible = loaded.section_visible
+            template.section_names = loaded.section_names
+            template.custom_sections = loaded.custom_sections
+            template.sync_custom_sections()
+            _set_profile_var_quiet(active_profile)
+            _refresh_all()
+            messagebox.showinfo("Imported", "Template imported successfully.")
+        except Exception as e:
+            messagebox.showerror("Error", f"Import failed: {e}")
+
+    ttk.Button(bottom, text="Restore Default to Original", command=_reset_default_profile).pack(side=tk.LEFT, padx=5)
+    ttk.Button(bottom, text="Export", command=_export_template).pack(side=tk.LEFT, padx=5)
+    ttk.Button(bottom, text="Import", command=_import_template).pack(side=tk.LEFT, padx=5)
     ttk.Button(bottom, text="Save and Close", command=save_and_close).pack(side=tk.RIGHT, padx=5)
     ttk.Button(bottom, text="Cancel", command=dialog.destroy).pack(side=tk.RIGHT, padx=5)
 
 
 # ── Report Comparison ─────────────────────────────────────────────
 
+_COMPARE_CATEGORIES = (
+    "ips", "emails", "phones", "screen_names",
+    "user_ids", "urls", "hashes",
+)
+
+_COMPARE_DND = False
+try:
+    import tkinterdnd2
+    _COMPARE_DND = True
+except (ImportError, RuntimeError):
+    pass
+
+
+def _parse_dnd_file_list(widget: tk.Misc, data: str) -> List[str]:
+    """Parse tkdnd file drop *data* into a list of paths (handles spaces, Windows braces)."""
+    if not data or not data.strip():
+        return []
+    try:
+        return [str(p) for p in widget.tk.splitlist(data)]
+    except tk.TclError:
+        paths: List[str] = []
+        for token in data.replace("{", " ").replace("}", " ").split():
+            token = token.strip()
+            if token:
+                paths.append(token)
+        return paths
+
+
+def _comparison_tag_docx_style(tags: FrozenSet[str]) -> Dict[str, object]:
+    """Map Tk Text tags to python-docx run options (first matching tag wins)."""
+    from docx.shared import RGBColor
+
+    priority: List[Tuple[str, Dict[str, object]]] = [
+        ("error", {"bold": True, "color": RGBColor(0xCC, 0x00, 0x00)}),
+        ("title", {"bold": True, "size_pt": 16, "color": RGBColor(0x1A, 0x3A, 0x5C)}),
+        ("section_header", {"bold": True, "size_pt": 12, "color": RGBColor(0x2A, 0x64, 0x96)}),
+        ("report_header", {"bold": True, "size_pt": 11, "color": RGBColor(0x1A, 0x3A, 0x5C)}),
+        ("category_header", {"bold": True, "size_pt": 11, "color": RGBColor(0x00, 0x55, 0x00)}),
+        ("shared_value", {"bold": True, "color": RGBColor(0xCC, 0x44, 0x00)}),
+        ("legend", {"italic": True, "size_pt": 9, "color": RGBColor(0x88, 0x88, 0x88)}),
+        ("no_data", {"italic": True, "color": RGBColor(0x99, 0x99, 0x99)}),
+        ("tip_refs", {"size_pt": 9, "color": RGBColor(0x66, 0x66, 0x66)}),
+        ("separator", {"color": RGBColor(0x88, 0x88, 0x88)}),
+        ("tip_list", {"color": RGBColor(0x33, 0x55, 0x77)}),
+        ("detail_category", {"bold": True, "color": RGBColor(0x33, 0x33, 0x33)}),
+        ("detail_value", {"color": RGBColor(0x44, 0x44, 0x44)}),
+        ("common_value", {}),
+    ]
+    for tag, style in priority:
+        if tag in tags:
+            return style
+    return {}
+
+
+def _export_comparison_to_docx(text_widget: tk.Text, filepath: str) -> None:
+    """Write comparison results to *filepath* preserving tag colors and emphasis."""
+    from docx import Document
+    from docx.shared import Pt
+
+    doc = Document()
+    active: Set[str] = set()
+    para = None
+
+    def apply_run(run, tags: Set[str]) -> None:
+        st = _comparison_tag_docx_style(frozenset(tags))
+        run.bold = bool(st.get("bold", False))
+        run.italic = bool(st.get("italic", False))
+        sz = st.get("size_pt")
+        if sz:
+            run.font.size = Pt(int(sz))
+        col = st.get("color")
+        if col is not None:
+            run.font.color.rgb = col  # type: ignore[assignment]
+
+    for key, value, *_ in text_widget.dump("1.0", tk.END, text=True, tag=True):
+        if key == "tagon":
+            active.add(value)
+        elif key == "tagoff":
+            active.discard(value)
+        elif key == "text":
+            if value == "":
+                continue
+            lines = value.split("\n")
+            for li, line in enumerate(lines):
+                if li > 0 or para is None:
+                    para = doc.add_paragraph()
+                if line:
+                    apply_run(para.add_run(line), set(active))
+
+    doc.save(filepath)
+
+
+def _collect_json_paths(path: str) -> List[str]:
+    """Return .json file paths from *path*.  If *path* is a directory,
+    recursively walk it; otherwise return it as-is if it ends with .json."""
+    p = Path(path)
+    if p.is_dir():
+        return sorted(str(f) for f in p.rglob("*.json") if f.is_file())
+    if p.suffix.lower() == ".json" and p.is_file():
+        return [str(p)]
+    return []
+
+
 def show_comparison_dialog(root: tk.Tk) -> None:
     dialog = tk.Toplevel(root)
     dialog.title("Compare CyberTip Reports")
-    dialog.geometry("900x700")
+    dialog.geometry("1000x800")
     dialog.transient(root)
-    dialog.grab_set()
+    # Do not use grab_set(): it prevents native file drag-and-drop onto this window on Windows.
 
-    tk.Label(dialog, text="Load multiple CyberTip JSON files to find common identifiers.", font=("Arial", 11)).pack(pady=10)
+    compare_dnd_ok = False
+    if _COMPARE_DND:
+        try:
+            tkinterdnd2.TkinterDnD._require(root)
+            compare_dnd_ok = True
+        except RuntimeError as exc:
+            log.warning("tkdnd could not be loaded for comparison dialog: %s", exc)
 
+    tk.Label(
+        dialog,
+        text="Load multiple CyberTip JSON files to find common identifiers.",
+        font=("Arial", 11),
+    ).pack(pady=10)
+
+    # --- drop zone ---
+    dnd_hint = (
+        "Drag & drop .json files or folders here"
+        if compare_dnd_ok else
+        "Use the buttons to add .json files or folders"
+    )
+    drop_frame = tk.Frame(
+        dialog, bd=2, relief="groove", bg="#f0f4f8",
+        highlightbackground="#a0b4c8", highlightthickness=1,
+    )
+    drop_frame.pack(fill="x", padx=10, pady=(0, 5))
+    drop_label = tk.Label(
+        drop_frame, text=dnd_hint,
+        font=("Arial", 10, "italic"), fg="#6688aa", bg="#f0f4f8", pady=8,
+    )
+    drop_label.pack(fill="both", expand=True, padx=4, pady=4)
+
+    # --- file list with scrollbar ---
     files_frame = ttk.Frame(dialog)
     files_frame.pack(fill="x", padx=10, pady=5)
 
-    files_list = tk.Listbox(files_frame, width=80, height=5)
+    list_frame = ttk.Frame(files_frame)
+    list_frame.pack(side=tk.LEFT, fill="both", expand=True)
+
+    files_scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL)
+    files_list = tk.Listbox(
+        list_frame, width=80, height=8,
+        yscrollcommand=files_scrollbar.set,
+    )
+    files_scrollbar.config(command=files_list.yview)
     files_list.pack(side=tk.LEFT, fill="both", expand=True)
+    files_scrollbar.pack(side=tk.LEFT, fill=tk.Y)
+
     loaded_files: List[str] = []
 
+    count_label = tk.Label(dialog, text="Files loaded: 0", font=("Arial", 9))
+    count_label.pack(pady=(0, 5))
+
+    def _update_count():
+        count_label.config(text=f"Files loaded: {len(loaded_files)}")
+
+    def _ingest_paths(paths) -> int:
+        """Add JSON files (or folders of JSON files) to the list.
+        Returns the number of new files actually added."""
+        added = 0
+        for raw_path in paths:
+            for json_path in _collect_json_paths(raw_path):
+                if json_path not in loaded_files:
+                    loaded_files.append(json_path)
+                    files_list.insert(tk.END, os.path.basename(json_path))
+                    added += 1
+        _update_count()
+        return added
+
+    # --- buttons ---
     btn_frame = ttk.Frame(files_frame)
     btn_frame.pack(side=tk.RIGHT, padx=5)
 
-    def add_file():
-        path = filedialog.askopenfilename(filetypes=[("JSON files", "*.json")])
-        if path and path not in loaded_files:
-            loaded_files.append(path)
-            files_list.insert(tk.END, os.path.basename(path))
+    def add_files():
+        paths = filedialog.askopenfilenames(filetypes=[("JSON files", "*.json")])
+        _ingest_paths(paths)
+
+    def add_folder():
+        folder = filedialog.askdirectory(title="Select folder to scan for .json files")
+        if folder:
+            added = _ingest_paths([folder])
+            if added == 0:
+                messagebox.showinfo("Add Folder", "No .json files found in the selected folder.")
 
     def remove_file():
         sel = files_list.curselection()
         if sel:
             loaded_files.pop(sel[0])
             files_list.delete(sel[0])
+            _update_count()
 
-    tk.Button(btn_frame, text="Add File", command=add_file, width=12).pack(pady=3)
+    def clear_all():
+        loaded_files.clear()
+        files_list.delete(0, tk.END)
+        _update_count()
+
+    tk.Button(btn_frame, text="Add Files", command=add_files, width=12).pack(pady=3)
+    tk.Button(btn_frame, text="Add Folder", command=add_folder, width=12).pack(pady=3)
     tk.Button(btn_frame, text="Remove", command=remove_file, width=12).pack(pady=3)
+    tk.Button(btn_frame, text="Clear All", command=clear_all, width=12).pack(pady=3)
 
-    results_text = scrolledtext.ScrolledText(dialog, width=100, height=30, wrap="word")
+    # --- drag-and-drop setup ---
+    def _on_drag_enter(event):
+        drop_frame.config(bg="#d6e8f7", highlightbackground="#3388cc", highlightthickness=2)
+        drop_label.config(bg="#d6e8f7", fg="#2266aa", text="Drop files or folders here...")
+
+    def _on_drag_leave(event):
+        drop_frame.config(bg="#f0f4f8", highlightbackground="#a0b4c8", highlightthickness=1)
+        drop_label.config(bg="#f0f4f8", fg="#6688aa", text=dnd_hint)
+
+    def _on_drop(event):
+        _on_drag_leave(event)
+        paths = _parse_dnd_file_list(dialog, getattr(event, "data", "") or "")
+        if not paths:
+            return
+        added = _ingest_paths(paths)
+        if added:
+            drop_label.config(fg="#228833", text=f"{added} file(s) added")
+            dialog.after(2500, lambda: drop_label.config(fg="#6688aa", text=dnd_hint))
+
+    if compare_dnd_ok:
+        try:
+            # Register the label (fills the drop zone); child widgets do not inherit drop targets.
+            drop_label.drop_target_register(tkinterdnd2.DND_FILES)
+            drop_label.dnd_bind("<<Drop>>", _on_drop)
+            drop_label.dnd_bind("<<DragEnter>>", _on_drag_enter)
+            drop_label.dnd_bind("<<DragLeave>>", _on_drag_leave)
+        except Exception as exc:
+            log.warning("Could not enable drag-and-drop on comparison dialog: %s", exc)
+
+    # --- results area ---
+    results_text = scrolledtext.ScrolledText(
+        dialog, width=110, height=30, wrap="word",
+        font=("Consolas", 10), bg="#fdfdfd",
+    )
     results_text.pack(fill="both", expand=True, padx=10, pady=10)
 
+    # Text tags for styled output
+    results_text.tag_configure("title", font=("Arial", 13, "bold"), foreground="#1a3a5c")
+    results_text.tag_configure("separator", foreground="#888888")
+    results_text.tag_configure("tip_list", font=("Consolas", 10), foreground="#335577", lmargin1=20)
+    results_text.tag_configure("section_header", font=("Arial", 12, "bold"), foreground="#2a6496",
+                               spacing3=4)
+    results_text.tag_configure("category_header", font=("Consolas", 11, "bold"), foreground="#005500",
+                               lmargin1=10)
+    results_text.tag_configure("common_value", font=("Consolas", 10), lmargin1=30)
+    results_text.tag_configure("tip_refs", font=("Consolas", 9), foreground="#666666")
+    results_text.tag_configure("report_header", font=("Arial", 11, "bold"), foreground="#1a3a5c",
+                               spacing1=6)
+    results_text.tag_configure("detail_category", font=("Consolas", 10, "bold"), foreground="#333333",
+                               lmargin1=20)
+    results_text.tag_configure("detail_value", font=("Consolas", 10), foreground="#444444", lmargin1=40)
+    results_text.tag_configure("shared_value", font=("Consolas", 10, "bold"), foreground="#cc4400",
+                               lmargin1=40)
+    results_text.tag_configure("no_data", font=("Consolas", 10, "italic"), foreground="#999999",
+                               lmargin1=20)
+    results_text.tag_configure("legend", font=("Consolas", 9, "italic"), foreground="#888888")
+    results_text.tag_configure("error", font=("Consolas", 10, "bold"), foreground="#cc0000")
+
+    def _ins(text: str, *tags: str):
+        results_text.insert(tk.END, text, tags)
+
+    # --- comparison logic (pairwise overlap: values in 2+ reports) ---
     def run_comparison():
         if len(loaded_files) < 2:
             messagebox.showwarning("Warning", "Load at least 2 files to compare.")
@@ -1329,44 +2280,112 @@ def show_comparison_dialog(root: tk.Tk) -> None:
         for path in loaded_files:
             data = load_json(path)
             if data is None:
-                results_text.insert(tk.END, f"ERROR: Could not load {os.path.basename(path)}\n")
+                _ins(f"ERROR: Could not load {os.path.basename(path)}\n", "error")
                 continue
             comparison = extract_comparison_data(data)
-            report_id = data.get("reportId", os.path.basename(path))
+            report_id = str(data.get("reportId", os.path.basename(path)))
             all_data[report_id] = comparison
 
         if len(all_data) < 2:
-            results_text.insert(tk.END, "Not enough valid files to compare.\n")
+            _ins("Not enough valid files to compare.\n", "error")
             return
 
-        results_text.insert(tk.END, f"Comparing {len(all_data)} CyberTip reports\n")
-        results_text.insert(tk.END, "=" * 60 + "\n\n")
+        _ins(f"Comparing {len(all_data)} CyberTip Reports\n", "title")
+        for rid in sorted(all_data.keys()):
+            _ins(f"  - CyberTip #{rid}\n", "tip_list")
+        _ins("=" * 60 + "\n\n", "separator")
 
-        report_ids = list(all_data.keys())
+        found_any = False
 
-        for category in ("ips", "emails", "phones", "screen_names", "user_ids", "hashes"):
+        for category in _COMPARE_CATEGORIES:
             label = category.replace("_", " ").title()
-            sets = [all_data[rid].get(category, set()) for rid in report_ids]
-            if not any(sets):
+
+            value_to_tips: Dict[str, Set[str]] = defaultdict(set)
+            for rid, comp in all_data.items():
+                for val in comp.get(category, set()):
+                    value_to_tips[val].add(rid)
+
+            common = {v: tips for v, tips in value_to_tips.items() if len(tips) >= 2}
+            if not common:
                 continue
 
-            common = sets[0]
-            for s in sets[1:]:
-                common = common & s
+            found_any = True
+            sorted_vals = sorted(common.items(), key=lambda x: len(x[1]), reverse=True)
+            _ins(f"COMMON {label.upper()} ", "category_header")
+            _ins(f"({len(common)} values)\n", "tip_refs")
+            for val, tips in sorted_vals:
+                tip_list = ", ".join(sorted(tips))
+                _ins(f"  {val}  ", "common_value")
+                _ins(f"-- Found in {len(tips)} tips: {tip_list}\n", "tip_refs")
+            _ins("\n")
 
-            if common:
-                results_text.insert(tk.END, f"COMMON {label.upper()} ({len(common)}):\n")
-                for val in sorted(common):
-                    present_in = [rid for rid in report_ids if val in all_data[rid].get(category, set())]
-                    results_text.insert(tk.END, f"  {val}  (in tips: {', '.join(present_in)})\n")
-                results_text.insert(tk.END, "\n")
+        if not found_any:
+            _ins("No common identifiers found across the loaded reports.\n\n", "no_data")
 
-        results_text.insert(tk.END, "\nPER-REPORT SUMMARY:\n" + "-" * 40 + "\n")
+        # Build a set of values that appeared in 2+ reports so we can
+        # highlight them in the per-report detail.
+        shared_values: Dict[str, set] = defaultdict(set)
+        for category in _COMPARE_CATEGORIES:
+            for rid, comp in all_data.items():
+                for val in comp.get(category, set()):
+                    shared_values[(category, val)].add(rid)
+
+        _ins("\nPER-REPORT DETAIL\n", "section_header")
+        _ins("=" * 60 + "\n", "separator")
+
         for rid, comp in all_data.items():
-            results_text.insert(tk.END, f"\nTip #{rid}:\n")
-            for cat, vals in comp.items():
-                if vals:
-                    results_text.insert(tk.END, f"  {cat.replace('_',' ').title()}: {len(vals)}\n")
+            _ins(f"\nCyberTip #{rid}\n", "report_header")
+            has_data = False
+            for cat in _COMPARE_CATEGORIES:
+                vals = comp.get(cat, set())
+                if not vals:
+                    continue
+                has_data = True
+                label = cat.replace("_", " ").title()
+                _ins(f"  {label} ({len(vals)}):\n", "detail_category")
+                for val in sorted(vals):
+                    is_shared = len(shared_values.get((cat, val), set())) >= 2
+                    if is_shared:
+                        _ins(f"    {val} *\n", "shared_value")
+                    else:
+                        _ins(f"    {val}\n", "detail_value")
+            if not has_data:
+                _ins("  (no identifiers extracted)\n", "no_data")
 
-    tk.Button(dialog, text="Compare", command=run_comparison).pack(pady=5)
-    tk.Button(dialog, text="Close", command=dialog.destroy).pack(pady=5)
+        _ins("\n" + "-" * 60 + "\n", "separator")
+        _ins("* = value also found in another CyberTip report\n", "legend")
+
+    # --- export results ---
+    def export_results():
+        content = results_text.get(1.0, tk.END).strip()
+        if not content:
+            messagebox.showinfo("Export", "No results to export. Run a comparison first.")
+            return
+        path = filedialog.asksaveasfilename(
+            defaultextension=".docx",
+            filetypes=[
+                ("Word document", "*.docx"),
+                ("Plain text", "*.txt"),
+                ("All files", "*.*"),
+            ],
+            title="Export Comparison Results",
+        )
+        if not path:
+            return
+        try:
+            lower = path.lower()
+            if lower.endswith(".docx"):
+                _export_comparison_to_docx(results_text, path)
+            else:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(content)
+            messagebox.showinfo("Export", f"Results exported to:\n{path}")
+        except Exception as exc:
+            messagebox.showerror("Export Error", str(exc))
+
+    # --- bottom buttons ---
+    bottom_frame = ttk.Frame(dialog)
+    bottom_frame.pack(pady=5)
+    tk.Button(bottom_frame, text="Compare", command=run_comparison, width=14).pack(side=tk.LEFT, padx=5)
+    tk.Button(bottom_frame, text="Export Results", command=export_results, width=14).pack(side=tk.LEFT, padx=5)
+    tk.Button(bottom_frame, text="Close", command=dialog.destroy, width=14).pack(side=tk.LEFT, padx=5)

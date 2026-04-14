@@ -15,6 +15,7 @@ log = get_logger(__name__)
 
 PLACEMENT_PREFIXES = {
     "At Beginning of Report": "at_beginning:",
+    "After introduction paragraph": "after_intro:",
     "Before Incident Summary": "before_incident:",
     "After Incident Summary": "after_incident:",
     "Before Suspect Information": "before_suspect:",
@@ -23,10 +24,31 @@ PLACEMENT_PREFIXES = {
     "After Evidence Summary": "after_evidence:",
     "Before IP Address Analysis": "before_ip:",
     "After IP Address Analysis": "after_ip:",
+    "After main sections (before final custom block)": "after_all_sections:",
     "At End of Report": "",
 }
 
 PREFIX_TO_PLACEMENT = {v: k for k, v in PLACEMENT_PREFIXES.items()}
+
+
+def _custom_section_id(name: str) -> str:
+    safe = "".join(c if c.isalnum() or c == "_" else "_" for c in name.lower())
+    return f"custom_{safe}"
+
+
+def get_all_placement_prefixes(template=None) -> Dict[str, str]:
+    """Return PLACEMENT_PREFIXES extended with Before/After entries for
+    each custom section in *template*."""
+    result = dict(PLACEMENT_PREFIXES)
+    if template:
+        for cs in getattr(template, "custom_sections", []):
+            name = cs.get("name", "")
+            if not name:
+                continue
+            sid = _custom_section_id(name)
+            result[f"Before {name}"] = f"before_{sid}:"
+            result[f"After {name}"] = f"after_{sid}:"
+    return result
 
 DEFAULT_FORMATTING = {
     "font_size": 12,
@@ -105,11 +127,23 @@ def evaluate_condition(condition: str, data: dict) -> bool:
     Supported formats (constructed by the UI):
       - esp_name == "Facebook"
       - esp_name in ["Facebook", "Instagram"]
+      - has_evidence
+      - has_ips
+      - is_multi_tip
+      - suspect_count > 1
+      - Multiple data checks combined with && (AND), e.g. has_evidence&&has_ips
 
     No eval() is used.
     """
     if not condition:
         return True
+
+    condition = condition.strip()
+    if "&&" in condition:
+        parts = [p.strip() for p in condition.split("&&") if p.strip()]
+        if not parts:
+            return True
+        return all(evaluate_condition(p, data) for p in parts)
 
     esp_name = (
         data.get("reportedInformation", {})
@@ -117,7 +151,29 @@ def evaluate_condition(condition: str, data: dict) -> bool:
         .get("espName", "N/A")
     )
 
+    reported_info = data.get("reportedInformation") or {}
+    evidence_files = (reported_info.get("fileDetails") or {}).get("uploadedFiles") or []
+    ip_list = (reported_info.get("internetDetails") or {}).get("ipCaptureEvents") or []
+    persons = (reported_info.get("reportedPeople") or [])
+    recipients = (reported_info.get("intendedRecipients") or [])
+
     try:
+        if condition == "has_evidence":
+            return len(evidence_files) > 0
+        if condition == "has_ips":
+            return len(ip_list) > 0
+        if condition == "is_multi_tip":
+            return data.get("_is_multi_tip", False)
+        if condition.startswith("suspect_count"):
+            total = len(persons) + len(recipients)
+            m = re.match(r"suspect_count\s*(>|>=|==|<|<=)\s*(\d+)", condition)
+            if m:
+                op, val = m.group(1), int(m.group(2))
+                ops = {">": total > val, ">=": total >= val, "==": total == val,
+                       "<": total < val, "<=": total <= val}
+                return ops.get(op, False)
+            return False
+
         if " in " in condition and "[" in condition:
             field, values_str = condition.split(" in ", 1)
             field = field.strip()
@@ -160,6 +216,11 @@ def build_placeholder_context(
     total_ips: int = 0,
     agency_name: str = "",
     case_number: str = "",
+    suspect_email: str = "",
+    suspect_phone: str = "",
+    suspect_screen_name: str = "",
+    incident_date: str = "",
+    incident_type: str = "",
 ) -> Dict[str, str]:
     """Build the placeholder-substitution context dict."""
     return {
@@ -174,6 +235,12 @@ def build_placeholder_context(
         "TOTAL_IPS": str(total_ips),
         "AGENCY_NAME": agency_name or "[AGENCY_NAME]",
         "CASE_NUMBER": case_number or "[CASE_NUMBER]",
+        "SUSPECT_EMAIL": suspect_email or "N/A",
+        "SUSPECT_PHONE": suspect_phone or "N/A",
+        "SUSPECT_SCREEN_NAME": suspect_screen_name or "N/A",
+        "INCIDENT_DATE": incident_date or "N/A",
+        "INCIDENT_TYPE": incident_type or "N/A",
+        "EVIDENCE_COUNT": str(total_files),
     }
 
 
@@ -233,12 +300,12 @@ class StatementManager:
         return 999
 
     def _sorted_keys_for_prefix(self, prefix: str) -> List[str]:
-        """Return statement keys matching *prefix*, sorted by order then name."""
+        """Return statement keys matching *prefix*, sorted alphabetically by key."""
         keys = [
             k for k in self.statements
             if k not in DEFAULT_STATEMENTS and k.startswith(prefix) and k in self.selected
         ]
-        return sorted(keys, key=lambda k: (self.get_order(k), k))
+        return sorted(keys, key=lambda k: k.lower())
 
     def get_for_prefix(self, prefix: str, data: dict, context: Optional[Dict[str, str]] = None) -> str:
         """Return concatenated custom statements matching *prefix*."""
@@ -266,16 +333,18 @@ class StatementManager:
             return "\n\n" + "\n\n".join(parts) + "\n\n"
         return ""
 
-    def get_end_statements(self, data: dict, context: Optional[Dict[str, str]] = None) -> str:
+    def get_end_statements(self, data: dict, context: Optional[Dict[str, str]] = None,
+                            template=None) -> str:
         """Return custom statements without a specific section prefix."""
-        all_prefixes = [v for v in PLACEMENT_PREFIXES.values() if v]
+        all_pfx = get_all_placement_prefixes(template)
+        active_prefixes = [v for v in all_pfx.values() if v]
         keys = [
             k for k in self.statements
             if k not in DEFAULT_STATEMENTS
-            and not any(k.startswith(p) for p in all_prefixes)
+            and not any(k.startswith(p) for p in active_prefixes)
             and k in self.selected
         ]
-        keys.sort(key=lambda k: (self.get_order(k), k))
+        keys.sort(key=lambda k: k.lower())
 
         parts = []
         for key in keys:
@@ -294,10 +363,12 @@ class StatementManager:
             return "\n\nCUSTOM STATEMENTS:\n" + "\n\n".join(parts)
         return ""
 
-    def get_placement_label(self, key: str) -> str:
+    def get_placement_label(self, key: str, template=None) -> str:
         if key in DEFAULT_STATEMENTS:
             return "Default Statement"
-        for prefix, label in PREFIX_TO_PLACEMENT.items():
+        all_prefixes = get_all_placement_prefixes(template)
+        rev = {v: k for k, v in all_prefixes.items()}
+        for prefix, label in rev.items():
             if prefix and key.startswith(prefix):
                 return label
         return "At End of Report"

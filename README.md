@@ -9,9 +9,14 @@ CAT-RG (CyberTip Analysis Tool & Report Generator) is a standalone Windows appli
 
 This tool supports various Electronic Service Providers (ESPs) and uses external services like MaxMind for geolocation and ARIN for WHOIS data on IP addresses.
 
-Version: 2.1
-Release Date: February 26, 2026
+Version: 2.2
+Release Date: April 7, 2026
 Platform: Windows
+
+## What's new in 2.2 (since 2.1)
+
+- **Version bump:** CAT-RG is now **2.2** everywhere it is shown (Help > About, `catrg.__version__`, GitHub update checks).
+- **Compare Reports** feature (`load_json` / `extract_comparison_data` from `catrg.core.parser`). Includes drag-and-drop, DOCX and plain-text export
 
 ## Features:
 
@@ -37,7 +42,7 @@ Platform: Windows
 - **Credential Management:**
   - Required: MaxMind Account ID and License Key for geolocation.
   - Optional: ARIN API Key for higher WHOIS query limits (increases from 15/min, 256/day to 60/min, 1,000/day).
-  - Credentials are stored securely via the Windows Credential Manager (keyring) when available, falling back to JSON files in the user's AppData directory.
+ 
 
 - **Investigator Info:** Prompts for name and title on first run; used in reports.
 
@@ -88,13 +93,8 @@ Since CAT-RG is packaged as a standalone .exe using PyInstaller, no Python or ad
    - Do not delete these files unless you want to reset your configuration.
 
 4. **Dependencies (for running from source):**
-   - If running from source (not the .exe), ensure Python 3.13+ and install packages via `pip install -r requirements.txt`.
+   - If running from source (not the .exe), open a terminal in the **`V2.2`** folder, ensure Python 3.13+, and install packages via `pip install -r requirements.txt`.
 
-5. **Logo File:**
-   - The logo is bundled inside the .exe during packaging.
-
-6. **Windows Compatibility:**
-   - Tested on Windows 10/11. Ensure antivirus doesn't block the .exe (add exception if needed).
 
 # How to Use
 
@@ -226,13 +226,38 @@ For unlisted ESPs, basic parsing works, but ESP-specific notes (e.g., statements
 - **Credential Errors:** If queries fail, update via Help menu. Ensure internet access.
 - **IP Query Timeouts:** Increase timeout in code if needed (default 10s). Use ARIN key for more queries.
 - **DOCX/Excel Save Issues:** Ensure write permissions; try different save locations.
-- **No Logo:** If running from source, ensure `logo.jpg` is in the project root.
+- **No Logo:** If the banner is missing, confirm **`logo.jpg`** is in the **`V2.2`** project root and rebuild the **`.exe`** if needed (see packaging steps above).
 - **Large Reports Slow:** Cap IPs at 50 or use ARIN key.
 - **Errors on Launch:** Check for antivirus blocking. You can delete files in `%LOCALAPPDATA%\CATRG\` to reset configuration.
 
-## Support and Contact
+## Legal Notice
+This tool is designed for use by Internet Crimes Against Children (ICAC) Investigators, law enforcement, or their representatives. Users are responsible for ensuring they have proper legal authority to access and analyze the data. The tool is provided "as-is" without warranty.
 
-For issues, feature requests, or support:
+## License
+Proprietary software. All rights reserved.
 
-- Contact: Patrick Koebbe - Patrick.Koebbe@gmail.com
-- Include error messages, JSON sample, and steps to reproduce.
+Permission is hereby granted to law-enforcement agencies, digital-forensic analysts, and authorized investigative personnel ("Authorized Users") to use and copy this software for the purpose of criminal investigations, evidence review, training, or internal operational use.
+
+The following conditions apply:
+
+Redistribution: This software may not be sold, published, or redistributed to the general public. Redistribution outside an authorized agency requires written permission from the developer.
+
+No Warranty: This software is provided "AS IS," without warranty of any kind, express or implied, including but not limited to the warranties of accuracy, completeness, performance, non-infringement, or fitness for a particular purpose. The developer shall not be liable for any claim, damages, or other liability arising from the use of this software, including the handling of digital evidence.
+
+Evidence Integrity: Users are responsible for maintaining forensic integrity and chain of custody when handling evidence. This software does not alter source evidence files and is intended only for analysis and review.
+
+Modifications: Agencies and investigators may modify the software for internal purposes. Modified versions may not be publicly distributed without permission from the developer.
+
+Logging & Privacy: Users are responsible for controlling log files and output generated during use of the software to prevent unauthorized disclosure of sensitive or personally identifiable information.
+
+Compliance: Users agree to comply with all applicable laws, departmental policies, and legal requirements when using the software.
+
+By using this software, the user acknowledges that they have read, understood, and agreed to the above terms.
+
+About the Developer
+
+Patrick Koebbe is an Internet Crimes Against Children (ICAC) Investigator with expertise in digital forensics tools. This software was developed to streamline CyberTip analysis in real-world investigations.
+
+For support, feature requests, or collaborations, contact: patrick.koebbe@gmail.com
+
+

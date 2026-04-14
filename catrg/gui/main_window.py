@@ -7,13 +7,14 @@ from __future__ import annotations
 
 import os
 import queue
+import sys
 import threading
 import webbrowser
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 import tkinter as tk
-from typing import Optional
+from typing import Dict, List, Optional, Tuple
 
 from PIL import Image, ImageTk
 
@@ -23,11 +24,13 @@ from catrg.core.parser import (
     load_json,
     parse_cybertip,
     extract_ip_addresses,
+    IpOccurrence,
     ParsedCyberTip,
 )
 from catrg.core.ip_lookup import IpLookupService
 from catrg.core.report_generator import (
     generate_police_report,
+    generate_multi_tip_report,
     generate_ip_report,
     ReportTemplate,
 )
@@ -44,6 +47,8 @@ from catrg.gui.dialogs import (
     show_choose_statements_dialog,
     show_template_dialog,
     show_comparison_dialog,
+    _collect_json_paths,
+    _parse_dnd_file_list,
 )
 
 log = get_logger(__name__)
@@ -57,7 +62,45 @@ except (ImportError, RuntimeError):
     log.info("tkinterdnd2 not available; drag-and-drop disabled")
 
 
-VERSION = "2.1"
+VERSION = "2.2"
+
+
+def apply_window_icon(root: tk.Misc) -> None:
+    """Apply ``app_icon.ico`` to the title bar and taskbar (Windows + frozen-friendly).
+
+    Uses an absolute path (required for ``iconbitmap`` in many Tk builds) and
+    ``iconphoto`` as a fallback because taskbar behavior differs by Tk version.
+    """
+    base = get_base_path()
+    candidates = [
+        (base / "app_icon.ico").resolve(),
+    ]
+    if getattr(sys, "frozen", False):
+        exe_dir = Path(sys.executable).resolve().parent
+        candidates.append((exe_dir / "app_icon.ico").resolve())
+
+    ico_path = next((p for p in candidates if p.is_file()), None)
+    if ico_path is None:
+        log.debug("app_icon.ico not found (tried: %s)", candidates)
+        return
+
+    path_str = os.path.normpath(os.path.abspath(str(ico_path)))
+
+    try:
+        root.iconbitmap(path_str)
+    except tk.TclError as exc:
+        log.debug("iconbitmap failed for %s: %s", path_str, exc)
+
+    try:
+        pil_img = Image.open(ico_path)
+        if pil_img.mode != "RGBA":
+            pil_img = pil_img.convert("RGBA")
+        pil_img.thumbnail((256, 256), Image.Resampling.LANCZOS)
+        photo = ImageTk.PhotoImage(pil_img)
+        root.iconphoto(True, photo)
+        root._catrg_icon_photo = photo  # noqa: SLF001 — prevent GC
+    except Exception as exc:
+        log.debug("iconphoto failed: %s", exc)
 
 
 class CyberTipAnalyzer:
@@ -67,13 +110,15 @@ class CyberTipAnalyzer:
         self.root = root
         self.root.title("CAT-RG")
         self.root.geometry("800x650")
+        apply_window_icon(self.root)
 
-        self.json_file_path: Optional[str] = None
+        self.json_file_paths: List[str] = []
         self.config = ConfigManager()
         self.stmts = StatementManager()
-        self.template = ReportTemplate()
+        self.template = self._load_default_template()
         self.ip_service: Optional[IpLookupService] = None
-        self._current_tip: Optional[ParsedCyberTip] = None
+        self._current_tips: List[ParsedCyberTip] = []
+        self._merged_ip_data: Dict[str, List[IpOccurrence]] = {}
 
         # Load persisted state
         self.config.load_recent_files()
@@ -124,7 +169,7 @@ class CyberTipAnalyzer:
         self.root.config(menu=menubar)
 
         file_menu = tk.Menu(menubar, tearoff=0)
-        file_menu.add_command(label="Open File", command=self.open_file, accelerator="Ctrl+O")
+        file_menu.add_command(label="Open Files", command=self.open_files, accelerator="Ctrl+O")
         self.recent_menu = tk.Menu(file_menu, tearoff=0)
         file_menu.add_cascade(label="Recent Files", menu=self.recent_menu)
         file_menu.add_command(label="Save Report As", command=self.save_report_as, accelerator="Ctrl+S")
@@ -140,7 +185,7 @@ class CyberTipAnalyzer:
         tools_menu = tk.Menu(menubar, tearoff=0)
         tools_menu.add_command(label="Compare Reports", command=lambda: show_comparison_dialog(self.root))
         tools_menu.add_command(label="Report Template", command=lambda: show_template_dialog(self.root, self.template))
-        tools_menu.add_command(label="Customize Statements", command=lambda: show_customize_statements_dialog(self.root, self.stmts))
+        tools_menu.add_command(label="Customize Statements", command=lambda: show_customize_statements_dialog(self.root, self.stmts, template=self.template))
         menubar.add_cascade(label="Tools", menu=tools_menu)
 
         help_menu = tk.Menu(menubar, tearoff=0)
@@ -152,7 +197,7 @@ class CyberTipAnalyzer:
         help_menu.add_command(label="Check for Updates", command=self._check_for_updates)
         menubar.add_cascade(label="Help", menu=help_menu)
 
-        self.root.bind("<Control-o>", lambda e: self.open_file())
+        self.root.bind("<Control-o>", lambda e: self.open_files())
         self.root.bind("<Control-s>", lambda e: self.save_report_as())
         self.root.bind("<Control-n>", lambda e: self.new_analysis())
 
@@ -170,15 +215,15 @@ class CyberTipAnalyzer:
         messagebox.showinfo(
             "Help",
             "To use the CyberTip Analysis Tool & Report Generator:\n\n"
-            "1. Select a JSON file via 'File > Open File' or the 'Browse' button.\n"
-            "   You can also drag-and-drop a JSON file onto the window.\n\n"
+            "1. Add one or more .json files via 'Add Files', 'Add Folder',\n"
+            "   or drag-and-drop files/folders onto the window.\n\n"
             "2. Click 'Choose Statements' to select which statements to include.\n\n"
-            "3. Click 'Analyze CyberTip' to process and generate a report.\n\n"
+            "3. Click 'Analyze CyberTips' to process and generate a combined report.\n\n"
             "4. Save with 'File > Save Report As' (Ctrl+S) or export as text/Excel.\n\n"
             "5. Use 'Tools > Compare Reports' to find common data across tips.\n\n"
             "6. Use 'Tools > Report Template' to configure section order/visibility.\n\n"
             "HOT KEYS\n"
-            "- Ctrl+O: Open new .json file\n"
+            "- Ctrl+O: Open .json files\n"
             "- Ctrl+S: Save report as\n"
             "- Ctrl+N: Start new analysis\n\n"
             "Supported ESPs:\n"
@@ -197,29 +242,53 @@ class CyberTipAnalyzer:
         if self.logo_image:
             tk.Label(self.root, image=self.logo_image).pack(pady=10)
 
-        # Drop zone / file selection area
+        # Drop zone
+        self._dnd_hint = (
+            "Drag & drop .json files or folders here"
+            if _DND_AVAILABLE else
+            "Use the buttons to add .json files or folders"
+        )
         self.drop_frame = tk.Frame(
             self.root, bd=2, relief="groove", bg="#f0f4f8",
             highlightbackground="#a0b4c8", highlightthickness=1,
         )
         self.drop_frame.pack(fill="x", padx=40, pady=8)
 
-        dnd_hint = "Drag & drop a .json file here" if _DND_AVAILABLE else "Select a .json file below"
         self.drop_label = tk.Label(
-            self.drop_frame, text=dnd_hint,
-            font=("Arial", 10, "italic"), fg="#6688aa", bg="#f0f4f8", pady=10,
+            self.drop_frame, text=self._dnd_hint,
+            font=("Arial", 10, "italic"), fg="#6688aa", bg="#f0f4f8", pady=8,
         )
         self.drop_label.pack()
 
-        self.file_entry = tk.Entry(self.drop_frame, width=50, justify="center")
-        self.file_entry.pack(pady=(0, 5))
+        # File list with scrollbar
+        files_outer = ttk.Frame(self.drop_frame)
+        files_outer.pack(fill="x", padx=10, pady=(0, 5))
 
-        tk.Button(self.drop_frame, text="Browse to .json", command=self.open_file).pack(pady=(0, 8))
+        list_frame = ttk.Frame(files_outer)
+        list_frame.pack(side=tk.LEFT, fill="both", expand=True)
+        files_sb = ttk.Scrollbar(list_frame, orient=tk.VERTICAL)
+        self.files_listbox = tk.Listbox(
+            list_frame, width=60, height=5,
+            yscrollcommand=files_sb.set,
+        )
+        files_sb.config(command=self.files_listbox.yview)
+        self.files_listbox.pack(side=tk.LEFT, fill="both", expand=True)
+        files_sb.pack(side=tk.LEFT, fill=tk.Y)
+
+        btn_frame = ttk.Frame(files_outer)
+        btn_frame.pack(side=tk.RIGHT, padx=5)
+        tk.Button(btn_frame, text="Add Files", command=self.open_files, width=10).pack(pady=2)
+        tk.Button(btn_frame, text="Add Folder", command=self._add_folder, width=10).pack(pady=2)
+        tk.Button(btn_frame, text="Remove", command=self._remove_file, width=10).pack(pady=2)
+        tk.Button(btn_frame, text="Clear All", command=self._clear_files, width=10).pack(pady=2)
+
+        self.file_count_label = tk.Label(self.drop_frame, text="Files loaded: 0", font=("Arial", 9))
+        self.file_count_label.pack(pady=(0, 5))
 
         self.choose_btn = tk.Button(self.root, text="Choose Statements", command=self._choose_statements, state="disabled")
         self.choose_btn.pack(pady=5)
 
-        tk.Button(self.root, text="Analyze CyberTip", command=self.analyze_report).pack(pady=5)
+        tk.Button(self.root, text="Analyze CyberTips", command=self.analyze_report).pack(pady=5)
 
         # Progress area
         prog_frame = ttk.Frame(self.root)
@@ -232,8 +301,48 @@ class CyberTipAnalyzer:
         self.output_text = scrolledtext.ScrolledText(self.root, width=90, height=25)
         self.output_text.pack(pady=10)
 
+    # ── File list helpers ─────────────────────────────────────────
+
+    def _update_file_count(self) -> None:
+        self.file_count_label.config(text=f"Files loaded: {len(self.json_file_paths)}")
+        if self.json_file_paths:
+            self.choose_btn.config(state="normal")
+        else:
+            self.choose_btn.config(state="disabled")
+
+    def _ingest_paths(self, raw_paths) -> int:
+        added = 0
+        for raw in raw_paths:
+            for jp in _collect_json_paths(raw):
+                if jp not in self.json_file_paths:
+                    self.json_file_paths.append(jp)
+                    self.files_listbox.insert(tk.END, os.path.basename(jp))
+                    added += 1
+        self._update_file_count()
+        return added
+
+    def _remove_file(self) -> None:
+        sel = self.files_listbox.curselection()
+        if sel:
+            self.json_file_paths.pop(sel[0])
+            self.files_listbox.delete(sel[0])
+            self._update_file_count()
+
+    def _clear_files(self) -> None:
+        self.json_file_paths.clear()
+        self.files_listbox.delete(0, tk.END)
+        self._update_file_count()
+
+    def _add_folder(self) -> None:
+        folder = filedialog.askdirectory(title="Select folder to scan for .json files")
+        if folder:
+            added = self._ingest_paths([folder])
+            if added == 0:
+                messagebox.showinfo("Add Folder", "No .json files found in the selected folder.")
+
+    # ── Drag-and-drop ─────────────────────────────────────────────
+
     def _setup_dnd(self) -> None:
-        """Enable drag-and-drop if tkinterdnd2 is available."""
         if not _DND_AVAILABLE:
             return
         try:
@@ -247,26 +356,22 @@ class CyberTipAnalyzer:
 
     def _on_drag_enter(self, event) -> None:
         self.drop_frame.config(bg="#d6e8f7", highlightbackground="#3388cc", highlightthickness=2)
-        self.drop_label.config(bg="#d6e8f7", fg="#2266aa", text="Drop file here...")
+        self.drop_label.config(bg="#d6e8f7", fg="#2266aa", text="Drop files or folders here...")
 
     def _on_drag_leave(self, event) -> None:
         self.drop_frame.config(bg="#f0f4f8", highlightbackground="#a0b4c8", highlightthickness=1)
-        self.drop_label.config(bg="#f0f4f8", fg="#6688aa", text="Drag & drop a .json file here")
+        self.drop_label.config(bg="#f0f4f8", fg="#6688aa", text=self._dnd_hint)
 
     def _on_drop(self, event) -> None:
         self._on_drag_leave(event)
-        path = event.data.strip("{}")
-        if path.lower().endswith(".json"):
-            self.json_file_path = path
-            self.file_entry.delete(0, tk.END)
-            self.file_entry.insert(0, path)
-            self.config.add_recent_file(path)
-            self._update_recent_menu()
-            self.choose_btn.config(state="normal")
-            self.drop_label.config(fg="#228833", text="File loaded successfully")
-            self._set_status("File loaded via drag-and-drop")
-        else:
-            messagebox.showwarning("Warning", "Please drop a .json file.")
+        paths = _parse_dnd_file_list(self.root, getattr(event, "data", "") or "")
+        if not paths:
+            return
+        added = self._ingest_paths(paths)
+        if added:
+            self.drop_label.config(fg="#228833", text=f"{added} file(s) added")
+            self._set_status(f"{added} file(s) added via drag-and-drop")
+            self.root.after(2500, lambda: self.drop_label.config(fg="#6688aa", text=self._dnd_hint))
 
     # ── Thread-safe status updates ────────────────────────────────
 
@@ -285,15 +390,13 @@ class CyberTipAnalyzer:
 
     # ── File operations ───────────────────────────────────────────
 
-    def open_file(self) -> None:
-        path = filedialog.askopenfilename(filetypes=[("JSON files", "*.json")])
-        if path:
-            self.json_file_path = path
-            self.file_entry.delete(0, tk.END)
-            self.file_entry.insert(0, path)
-            self.config.add_recent_file(path)
+    def open_files(self) -> None:
+        paths = filedialog.askopenfilenames(filetypes=[("JSON files", "*.json")])
+        if paths:
+            self._ingest_paths(paths)
+            for p in paths:
+                self.config.add_recent_file(p)
             self._update_recent_menu()
-            self.choose_btn.config(state="normal")
 
     def _update_recent_menu(self) -> None:
         self.recent_menu.delete(0, tk.END)
@@ -305,10 +408,7 @@ class CyberTipAnalyzer:
 
     def _load_recent(self, path: str) -> None:
         if os.path.exists(path):
-            self.json_file_path = path
-            self.file_entry.delete(0, tk.END)
-            self.file_entry.insert(0, path)
-            self.choose_btn.config(state="normal")
+            self._ingest_paths([path])
         else:
             messagebox.showwarning("Warning", f"File not found: {path}")
             self.config.recent_files.remove(path)
@@ -316,12 +416,14 @@ class CyberTipAnalyzer:
             self._update_recent_menu()
 
     def _choose_statements(self) -> None:
-        if not self.json_file_path:
-            messagebox.showwarning("Warning", "Please select a JSON file first.")
+        if not self.json_file_paths:
+            messagebox.showwarning("Warning", "Please add a JSON file first.")
             return
 
+        preview_path = self.json_file_paths[0]
+
         def preview_fn():
-            data = load_json(self.json_file_path)
+            data = load_json(preview_path)
             if data is None:
                 return None
             tip = parse_cybertip(data)
@@ -332,7 +434,7 @@ class CyberTipAnalyzer:
                 self.template,
             )
 
-        show_choose_statements_dialog(self.root, self.stmts, self.json_file_path, preview_fn)
+        show_choose_statements_dialog(self.root, self.stmts, preview_path, preview_fn)
 
     # ── Export ────────────────────────────────────────────────────
 
@@ -372,7 +474,7 @@ class CyberTipAnalyzer:
             messagebox.showinfo("Success", f"Report exported as {filename}")
 
     def export_ip_excel(self) -> None:
-        if not self._current_tip or not self._current_tip.all_ip_data:
+        if not self._merged_ip_data:
             messagebox.showwarning("Warning", "No IP data available to export.")
             return
         filename = filedialog.asksaveasfilename(
@@ -383,16 +485,17 @@ class CyberTipAnalyzer:
         if not filename:
             return
         try:
-            export_ip_data(filename, self._current_tip.all_ip_data, self.ip_service)
+            export_ip_data(filename, self._merged_ip_data, self.ip_service)
             messagebox.showinfo("Success", f"IP data exported as {filename}")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to export IP data: {e}")
 
     def export_evidence_excel(self) -> None:
-        if not self._current_tip:
-            messagebox.showwarning("Warning", "No JSON file loaded to export evidence data.")
+        if not self._current_tips:
+            messagebox.showwarning("Warning", "No data available to export evidence.")
             return
-        if not self._current_tip.evidence_files:
+        has_evidence = any(t.evidence_files for t in self._current_tips)
+        if not has_evidence:
             messagebox.showwarning("Warning", "No evidence data available to export.")
             return
         filename = filedialog.asksaveasfilename(
@@ -403,7 +506,7 @@ class CyberTipAnalyzer:
         if not filename:
             return
         try:
-            export_evidence(filename, self._current_tip)
+            export_evidence(filename, self._current_tips[0], tips=self._current_tips)
             messagebox.showinfo("Success", f"Evidence summary exported as {filename}")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to export evidence summary: {e}")
@@ -427,8 +530,8 @@ class CyberTipAnalyzer:
     # ── Analysis ──────────────────────────────────────────────────
 
     def analyze_report(self) -> None:
-        if not self.json_file_path:
-            messagebox.showerror("Error", "Please select a JSON file")
+        if not self.json_file_paths:
+            messagebox.showerror("Error", "Please add at least one JSON file.")
             return
 
         self._set_status("Starting analysis...")
@@ -444,30 +547,41 @@ class CyberTipAnalyzer:
 
         def run():
             try:
-                data = load_json(self.json_file_path)
-                if data is None:
-                    q.put(("error", "Failed to load JSON"))
-                    return
+                tips_and_data: List[Tuple[ParsedCyberTip, dict]] = []
+                merged_ips: Dict[str, List[IpOccurrence]] = {}
 
-                valid, reason = validate_cybertip_json(data)
-                if not valid:
-                    q.put(("error", f"Invalid CyberTip JSON: {reason}"))
-                    return
+                for i, path in enumerate(self.json_file_paths):
+                    self._set_status(f"Loading file {i + 1}/{len(self.json_file_paths)}...")
+                    data = load_json(path)
+                    if data is None:
+                        q.put(("error", f"Failed to load: {os.path.basename(path)}"))
+                        return
 
-                self._set_status("Parsing CyberTip data...")
-                tip = parse_cybertip(data)
-                self._current_tip = tip
+                    valid, reason = validate_cybertip_json(data)
+                    if not valid:
+                        q.put(("error", f"Invalid JSON ({os.path.basename(path)}): {reason}"))
+                        return
 
-                # Determine which IPs to query
+                    tip = parse_cybertip(data)
+                    tips_and_data.append((tip, data))
+
+                    for ip, occs in tip.all_ip_data.items():
+                        merged_ips.setdefault(ip, []).extend(occs)
+
+                self._current_tips = [t for t, _ in tips_and_data]
+                self._merged_ip_data = merged_ips
+
                 max_ips = 50
-                all_ips = list(tip.all_ip_data.keys())
+                all_ips = list(merged_ips.keys())
                 num_unique = len(all_ips)
 
                 if num_unique > max_ips:
-                    self.root.after(0, lambda: self._prompt_ip_limit(num_unique, max_ips, data, tip, q))
+                    self.root.after(0, lambda: self._prompt_ip_limit(
+                        num_unique, max_ips, tips_and_data, merged_ips, q,
+                    ))
                     return
 
-                self._run_analysis_phase2(data, tip, all_ips, q)
+                self._run_analysis_phase2(tips_and_data, merged_ips, all_ips, q)
             except Exception as e:
                 log.exception("Analysis failed")
                 q.put(("error", str(e)))
@@ -476,18 +590,23 @@ class CyberTipAnalyzer:
         thread.start()
         self._poll_result(thread, q)
 
-    def _prompt_ip_limit(self, total: int, limit: int, data: dict, tip: ParsedCyberTip, q: queue.Queue) -> None:
+    def _prompt_ip_limit(
+        self, total: int, limit: int,
+        tips_and_data: List[Tuple[ParsedCyberTip, dict]],
+        merged_ips: Dict[str, List[IpOccurrence]],
+        q: queue.Queue,
+    ) -> None:
         process_all = messagebox.askyesno(
             "IP Limit Exceeded",
-            f"{total} unique IPs found (more than {limit}).\n"
+            f"{total} unique IPs found across all CyberTips (more than {limit}).\n"
             "Query all IPs for geolocation/WHOIS? (Yes: All -- may be slow; No: First 50 -- faster)\n"
             "All IPs will be listed in the report regardless.",
         )
-        ips_to_query = list(tip.all_ip_data.keys()) if process_all else list(tip.all_ip_data.keys())[:limit]
+        ips_to_query = list(merged_ips.keys()) if process_all else list(merged_ips.keys())[:limit]
 
         def resume():
             try:
-                self._run_analysis_phase2(data, tip, ips_to_query, q)
+                self._run_analysis_phase2(tips_and_data, merged_ips, ips_to_query, q)
             except Exception as e:
                 log.exception("Analysis phase 2 failed")
                 q.put(("error", str(e)))
@@ -496,19 +615,35 @@ class CyberTipAnalyzer:
         thread.start()
         self._poll_result(thread, q)
 
-    def _run_analysis_phase2(self, data: dict, tip: ParsedCyberTip, ips_to_query: list, q: queue.Queue) -> None:
+    def _run_analysis_phase2(
+        self,
+        tips_and_data: List[Tuple[ParsedCyberTip, dict]],
+        merged_ips: Dict[str, List[IpOccurrence]],
+        ips_to_query: list,
+        q: queue.Queue,
+    ) -> None:
         self._set_status(f"Generating report ({len(ips_to_query)} IPs to query)...")
 
-        police_report = generate_police_report(
-            tip, data, self.stmts,
-            self.config.investigator.title,
-            self.config.investigator.name,
-            self.template,
-            self.ip_service,
-        )
+        if len(tips_and_data) == 1:
+            tip, data = tips_and_data[0]
+            police_report = generate_police_report(
+                tip, data, self.stmts,
+                self.config.investigator.title,
+                self.config.investigator.name,
+                self.template,
+                self.ip_service,
+            )
+        else:
+            police_report = generate_multi_tip_report(
+                tips_and_data, self.stmts,
+                self.config.investigator.title,
+                self.config.investigator.name,
+                self.template,
+                self.ip_service,
+            )
 
         ip_report = generate_ip_report(
-            tip.all_ip_data,
+            merged_ips,
             self.ip_service,
             queried_ips=set(ips_to_query),
             progress_callback=self._set_progress,
@@ -548,21 +683,30 @@ class CyberTipAnalyzer:
 
     def clear_output(self) -> None:
         self.output_text.delete(1.0, tk.END)
-        self.file_entry.delete(0, tk.END)
-        self.json_file_path = None
-        self._current_tip = None
+        self._clear_files()
+        self._current_tips = []
+        self._merged_ip_data = {}
         if self.ip_service:
             self.ip_service.clear_cache()
         self.choose_btn.config(state="disabled")
-        self.stmts.selected = set(self.stmts.statements.keys())
         self.progress_bar["value"] = 0
         self._set_status("Ready")
 
     def new_analysis(self) -> None:
         self.clear_output()
-        self.open_file()
-        if self.json_file_path:
+        self.open_files()
+        if self.json_file_paths:
             self.analyze_report()
+
+    @staticmethod
+    def _load_default_template() -> ReportTemplate:
+        try:
+            profiles = ReportTemplate.list_profiles()
+            if "Default" in profiles:
+                return ReportTemplate.load_profile("Default")
+        except Exception:
+            pass
+        return ReportTemplate()
 
     def exit_app(self) -> None:
         self.config.save_recent_files()

@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import os
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 from catrg.core.parser import (
     ParsedCyberTip,
@@ -41,6 +42,12 @@ DEFAULT_SECTION_NAMES = {
 }
 
 
+def _custom_section_id(name: str) -> str:
+    """Generate a stable section ID from a custom section name."""
+    safe = "".join(c if c.isalnum() or c == "_" else "_" for c in name.lower())
+    return f"custom_{safe}"
+
+
 class ReportTemplate:
     """Controls which sections appear, their order, custom names,
     and user-defined custom sections.  Persists to disk as named profiles.
@@ -61,6 +68,33 @@ class ReportTemplate:
     def get_section_name(self, section_id: str) -> str:
         return self.section_names.get(section_id, section_id.upper().replace("_", " "))
 
+    def sync_custom_sections(self) -> None:
+        """Keep section_order / section_visible / section_names in sync
+        with the current custom_sections list."""
+        valid_ids = set()
+        for cs in self.custom_sections:
+            sid = _custom_section_id(cs.get("name", ""))
+            valid_ids.add(sid)
+            if sid not in self.section_order:
+                self.section_order.append(sid)
+            self.section_visible.setdefault(sid, True)
+            if sid not in self.section_names:
+                self.section_names[sid] = cs.get("name", "").upper()
+
+        stale = [s for s in self.section_order
+                 if s.startswith("custom_") and s not in valid_ids]
+        for s in stale:
+            self.section_order.remove(s)
+            self.section_visible.pop(s, None)
+            self.section_names.pop(s, None)
+
+    def get_custom_section_by_id(self, section_id: str) -> Optional[Dict[str, str]]:
+        """Return the custom_sections entry whose name matches *section_id*."""
+        for cs in self.custom_sections:
+            if _custom_section_id(cs.get("name", "")) == section_id:
+                return cs
+        return None
+
     # ── Serialisation ─────────────────────────────────────────────
 
     def to_dict(self) -> dict:
@@ -79,6 +113,7 @@ class ReportTemplate:
         t.section_visible = d.get("section_visible", {s: True for s in DEFAULT_SECTIONS})
         t.section_names = d.get("section_names", dict(DEFAULT_SECTION_NAMES))
         t.custom_sections = d.get("custom_sections", [])
+        t.sync_custom_sections()
         return t
 
     # ── Profile persistence ───────────────────────────────────────
@@ -99,6 +134,36 @@ class ReportTemplate:
         log.info("Saved template profile: %s", path)
 
     @classmethod
+    def write_factory_default_file(cls) -> "ReportTemplate":
+        """Write the built-in Default layout to ``Default.json`` only (other profile files untouched).
+
+        Returns the in-memory template that was written (name \"Default\", factory sections).
+        """
+        t = cls(name="Default")
+        t.save_profile()
+        log.info("Wrote factory Default profile to disk")
+        return t
+
+    @classmethod
+    def save_payload_as_named_profile(cls, payload: dict, profile_display_name: str) -> str:
+        """Write *payload* to the JSON file for *profile_display_name* without mutating
+        any in-memory :class:`ReportTemplate` instance.
+
+        Used for \"Create New Profile\" to write a new JSON file without changing other profiles."""
+        d = cls._ensure_dir()
+        out = dict(payload)
+        out["name"] = profile_display_name.strip()
+        safe = "".join(
+            c if c.isalnum() or c in (" ", "-", "_") else "_"
+            for c in profile_display_name.strip()
+        )
+        path = os.path.join(d, f"{safe}.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(out, f, indent=4)
+        log.info("Saved template profile (copy): %s", path)
+        return path
+
+    @classmethod
     def load_profile(cls, name: str) -> "ReportTemplate":
         d = cls._ensure_dir()
         safe = "".join(c if c.isalnum() or c in (" ", "-", "_") else "_" for c in name)
@@ -114,6 +179,15 @@ class ReportTemplate:
             if fn.endswith(".json"):
                 profiles.append(fn[:-5])
         return profiles
+
+    @classmethod
+    def combobox_profile_names(cls) -> List[str]:
+        """All profile file stems plus *Default* so the UI always offers Default."""
+        names = sorted(set(cls.list_profiles()) | {"Default"})
+        # Keep Default first when present
+        if "Default" in names:
+            return ["Default"] + [n for n in names if n != "Default"]
+        return names
 
     @classmethod
     def delete_profile(cls, name: str) -> None:
@@ -184,18 +258,24 @@ def generate_police_report(
         suspect_name=_first_suspect_name(tip),
         total_files=len(tip.evidence_files),
         total_ips=len(tip.all_ip_data),
+        suspect_email=_first_suspect_email(tip),
+        suspect_phone=_first_suspect_phone(tip),
+        suspect_screen_name=_first_suspect_screen_name(tip),
+        incident_date=tip.incident_datetime or "",
+        incident_type=tip.incident_type or "",
     )
 
     intro_raw = stmts.get_text("intro")
     intro = substitute_placeholders(intro_raw, ctx) + "\n\n"
 
     report = stmts.get_for_prefix("at_beginning:", data, ctx) + intro
+    report += stmts.get_for_prefix("after_intro:", data, ctx)
 
     section_builders = {
         "incident_summary": lambda: _build_incident_section(tip, data, stmts, tmpl),
         "suspect_information": lambda: _build_suspect_section(tip, tmpl),
         "evidence_summary": lambda: _build_evidence_section(tip, data, stmts, tmpl),
-        "ip_analysis": lambda: _build_meetme_ip_section(tip, ip_service) if "MeetMe" in tip.esp_name and ip_service else "",
+        "ip_analysis": lambda: _build_meetme_ip_section(tip, ip_service, tmpl) if "MeetMe" in tip.esp_name and ip_service else "",
     }
 
     for section in tmpl.section_order:
@@ -208,17 +288,53 @@ def generate_police_report(
         builder = section_builders.get(section)
         if builder:
             report += builder()
+        elif section.startswith("custom_"):
+            cs = tmpl.get_custom_section_by_id(section)
+            if cs:
+                name = tmpl.get_section_name(section)
+                body = substitute_placeholders(cs.get("body", ""), ctx)
+                report += f"\n{name}:\n{body}\n"
         if prefix_after:
             report += stmts.get_for_prefix(prefix_after, data, ctx)
         report += "\n"
 
-    for cs in tmpl.custom_sections:
-        report += f"\n{cs.get('name', 'CUSTOM SECTION').upper()}:\n"
-        body = cs.get("body", "")
-        report += substitute_placeholders(body, ctx) + "\n"
-
-    report += stmts.get_end_statements(data, ctx)
+    report += stmts.get_for_prefix("after_all_sections:", data, ctx)
+    report += stmts.get_end_statements(data, ctx, template=tmpl)
     return report
+
+
+def generate_multi_tip_report(
+    tips_and_data: List[Tuple[ParsedCyberTip, dict]],
+    stmts: StatementManager,
+    investigator_title: str,
+    investigator_name: str,
+    template: Optional[ReportTemplate] = None,
+    ip_service: Optional[IpLookupService] = None,
+) -> str:
+    """Generate a combined report for multiple CyberTips.
+
+    Each tip gets its own full report section (Incident, Suspect, Evidence)
+    wrapped in a CyberTip header.  The IP analysis section is excluded
+    per-tip because the caller generates one combined IP report separately.
+    """
+    tmpl = template or ReportTemplate()
+
+    no_ip_tmpl = copy.deepcopy(tmpl)
+    no_ip_tmpl.section_visible["ip_analysis"] = False
+
+    combined = ""
+    for tip, data in tips_and_data:
+        data["_is_multi_tip"] = True
+        header = f"{'=' * 50}\nCYBERTIP #{tip.report_id} ({tip.esp_name})\n{'=' * 50}\n\n"
+        per_tip = generate_police_report(
+            tip, data, stmts,
+            investigator_title, investigator_name,
+            template=no_ip_tmpl,
+            ip_service=ip_service,
+        )
+        combined += header + per_tip + "\n"
+
+    return combined
 
 
 def _first_suspect_name(tip: ParsedCyberTip) -> str:
@@ -231,6 +347,28 @@ def _first_suspect_name(tip: ParsedCyberTip) -> str:
     return ""
 
 
+def _first_suspect_email(tip: ParsedCyberTip) -> str:
+    if tip.persons:
+        for em in tip.persons[0].emails:
+            if em.get("value") and em["value"] != "N/A":
+                return em["value"]
+    return ""
+
+
+def _first_suspect_phone(tip: ParsedCyberTip) -> str:
+    if tip.persons:
+        for ph in tip.persons[0].phones:
+            if ph.get("value") and ph["value"] != "N/A":
+                return ph["value"]
+    return ""
+
+
+def _first_suspect_screen_name(tip: ParsedCyberTip) -> str:
+    if tip.persons and tip.persons[0].screen_name:
+        return tip.persons[0].screen_name
+    return ""
+
+
 def _section_prefix_map(section: str, direction: str) -> str:
     mapping = {
         "incident_summary": {"before": "before_incident:", "after": "after_incident:"},
@@ -238,7 +376,11 @@ def _section_prefix_map(section: str, direction: str) -> str:
         "evidence_summary": {"before": "before_evidence:", "after": "after_evidence:"},
         "ip_analysis": {"before": "before_ip:", "after": "after_ip:"},
     }
-    return mapping.get(section, {}).get(direction, "")
+    if section in mapping:
+        return mapping[section].get(direction, "")
+    if section.startswith("custom_"):
+        return f"{direction}_{section}:" if direction else ""
+    return ""
 
 
 def _build_incident_section(tip: ParsedCyberTip, data: dict, stmts: StatementManager, tmpl: ReportTemplate) -> str:
@@ -463,8 +605,10 @@ def _build_evidence_section(tip: ParsedCyberTip, data: dict, stmts: StatementMan
     return "\n".join(lines)
 
 
-def _build_meetme_ip_section(tip: ParsedCyberTip, svc: IpLookupService) -> str:
-    lines = ["IP ADDRESS ANALYSIS:\n"]
+def _build_meetme_ip_section(tip: ParsedCyberTip, svc: IpLookupService,
+                             tmpl: Optional[ReportTemplate] = None) -> str:
+    header = tmpl.get_section_name("ip_analysis") if tmpl else "IP ADDRESS ANALYSIS"
+    lines = [f"{header}:\n"]
     if not tip.meetme_ip_logs:
         lines.append("No IP address login history found in the provided data.\n")
         return "\n".join(lines)

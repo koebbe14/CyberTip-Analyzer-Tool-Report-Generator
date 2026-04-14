@@ -1,6 +1,20 @@
 """Entry point for CAT-RG."""
 
+import sys
+
+# Before Tk loads: Windows groups this process with its own taskbar / shortcut icon.
+if sys.platform == "win32":
+    try:
+        import ctypes
+
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            "PatrickKoebbe.CAT-RG.Application.2.2"
+        )
+    except Exception:
+        pass
+
 import tkinter as tk
+
 from catrg.gui.main_window import CyberTipAnalyzer, _DND_AVAILABLE
 
 try:
